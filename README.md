@@ -119,3 +119,7 @@ internal/
 ## 状态
 
 单账号。`send_card` / `send_action_card` / 点赞 / `message_self` 未实现。
+
+## 许可证
+
+[GPL-3.0](LICENSE)
