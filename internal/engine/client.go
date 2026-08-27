@@ -1,0 +1,729 @@
+package engine
+
+import (
+	"bytes"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// -- 常量（来自 ImClient.ts）------------------------------------------------
+
+const (
+	androidSendWsBase = "wss://frontier-aweme-lf-ipainner.amemv.com/ws/v2"
+
+	akFpID   = "9"
+	akAppKey = "e1bd35ec9db7b8d846de66ed140b1ad9"
+	akSalt   = "f8a69f1719916z"
+
+	awemeAID               = "1128"
+	awemeSDKVersion        = "5.0.3.0-rc.11-SNAPSHOT"
+	awemeBuildNumber       = "5030"
+	awemeVersionCode       = "280400"
+	awemeVersionName       = "28.4.0"
+	awemeUpdateVersionCode = "28409900"
+	awemeChannel           = "douyinweb1_64"
+	awemeDeviceType        = "24031PN0DC"
+	awemeDeviceBrand       = "XIAOMI"
+	awemeOSVersion         = "14"
+	awemeOSAPI             = "34"
+	awemeAppName           = "aweme"
+	awemeAppPackage        = "com.ss.android.ugc.aweme"
+	awemeUA                = "okhttp/3.12.1 com.ss.android.ugc.aweme/280400"
+)
+
+// -- 对外类型 ---------------------------------------------------------------
+
+// ImImage 图片消息（aweType 2702）资源，供下载 + AES-256-GCM(key=skey) 解密。
+type ImImage struct {
+	Skey          string
+	OriginURLList []string
+	LargeURLList  []string
+	MediumURLList []string
+	ThumbURLList  []string
+	Md5           string
+}
+
+// PickURL 取一个可用的原图 URL（优先 origin，其次 large/medium/thumb）。
+func (im *ImImage) PickURL() string {
+	for _, l := range [][]string{im.OriginURLList, im.LargeURLList, im.MediumURLList, im.ThumbURLList} {
+		if len(l) > 0 {
+			return l[0]
+		}
+	}
+	return ""
+}
+
+// IncomingMessage 投递给上层的一条收到的消息。
+type IncomingMessage struct {
+	ConvID    string
+	SenderID  string
+	SenderMs4 string
+	Text      string
+	AweType   int
+	Image     *ImImage
+	Direction string // 目前只投递 recv
+}
+
+// Client frontier-aweme IM 客户端（单账号）。
+type Client struct {
+	Cookie   string
+	CkUid    string // 账号 user_id，既作 selfUid 也作 device_id
+	DeviceID string
+	Proxy    *WsProxy
+	OnRaw    func([]byte) // 可选：每收到一帧原始 payload 就回调（调试用）
+	seq      int64
+}
+
+// New 创建客户端。uid 为账号 user_id。
+func New(cookie, uid, deviceID string) *Client {
+	return &Client{Cookie: cookie, CkUid: strings.TrimSpace(uid), DeviceID: deviceID}
+}
+
+func (c *Client) nextSeq() int { return int(atomic.AddInt64(&c.seq, 1)) }
+
+func (c *Client) computeAccessKey(deviceID string) string {
+	sum := md5.Sum([]byte(akFpID + akAppKey + deviceID + akSalt))
+	return hex.EncodeToString(sum[:])
+}
+
+// -- 连接 -------------------------------------------------------------------
+
+// Connect 建立 frontier-aweme 发送/接收连接。
+func (c *Client) Connect() (*WsConn, error) {
+	if strings.TrimSpace(c.CkUid) == "" {
+		return nil, errors.New("发送连接失败：缺少 user_id")
+	}
+	return c.makeClient(c.buildAndroidSendWsURL())
+}
+
+func (c *Client) buildAndroidSendWsURL() string {
+	deviceID := c.CkUid
+	now := time.Now().Unix()
+	params := [][2]string{
+		{"aid", awemeAID}, {"fpid", akFpID}, {"sdk_version", "3"}, {"device_id", deviceID}, {"iid", deviceID},
+		{"access_key", c.computeAccessKey(deviceID)}, {"pl", "0"}, {"ne", "1"},
+		{"version_code", awemeVersionCode}, {"version_name", awemeVersionName}, {"update_version_code", awemeUpdateVersionCode},
+		{"platform", "0"}, {"monitor_service_id_list", "[]"}, {"is_background", "0"}, {"ping-interval", "30"},
+		{"qos_level", "2"}, {"qos_sdk_version", "2"}, {"ttnet_ignore_offline", "1"}, {"ws_connect_protocol", "0"},
+		{"device_platform", "android"}, {"os", "android"}, {"app_name", awemeAppName}, {"package", awemeAppPackage},
+		{"channel", awemeChannel}, {"ac", "wifi"}, {"language", "zh"}, {"device_type", awemeDeviceType},
+		{"device_brand", awemeDeviceBrand}, {"os_api", awemeOSAPI}, {"os_version", awemeOSVersion},
+		{"ts", strconv.FormatInt(now, 10)}, {"_rticket", strconv.FormatInt(now*1000, 10)},
+	}
+	var sb strings.Builder
+	for i, kv := range params {
+		if i > 0 {
+			sb.WriteByte('&')
+		}
+		sb.WriteString(kv[0])
+		sb.WriteByte('=')
+		sb.WriteString(rawURLEncode(kv[1]))
+	}
+	return androidSendWsBase + "?" + sb.String()
+}
+
+func (c *Client) makeClient(wsURL string) (*WsConn, error) {
+	headers := map[string]string{
+		"User-Agent":             awemeUA,
+		"Origin":                 "wss://frontier-aweme-lf-ipainner.amemv.com",
+		"Cookie":                 c.Cookie,
+		"x-support-qos2":         "1",
+		"x-support-ack":          "1",
+		"sdk-version":            "2",
+		"passport-sdk-version":   "601504",
+		"X-SS-DP":                awemeAID,
+		"x-tt-store-region":      "cn",
+		"x-tt-store-region-src":  "uid",
+		"x-bd-kmsv":              "1",
+		"Sec-WebSocket-Protocol": "pbbp2",
+	}
+	cookies := parseCookies(c.Cookie)
+	if v, ok := cookies["session_tlb_tag"]; ok {
+		headers["session-tlb-tag"] = uriDecode(v)
+	}
+	if v, ok := cookies["passport_mfa_token"]; ok {
+		headers["x-tt-passport-mfa-token"] = uriDecode(v)
+	}
+	return wsConnect(wsURL, headers, c.Proxy, 30*time.Second)
+}
+
+// -- 收发主循环 -------------------------------------------------------------
+
+// RunSession 心跳 + 收包主循环，返回断开原因：stop（被要求停止）或 disconnect（连接断了）。
+func (c *Client) RunSession(conn *WsConn, onMessage func(IncomingMessage), shouldStop func() bool) string {
+	const heartbeat = 15 * time.Second
+	const deadAfter = 40 * time.Second
+
+	var lastRecv atomic.Int64
+	lastRecv.Store(time.Now().Unix())
+	reason := "disconnect"
+	stop := make(chan struct{})
+	var once sync.Once
+	done := func() { once.Do(func() { close(stop) }) }
+
+	go func() {
+		t := time.NewTicker(heartbeat)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				conn.Ping()
+				if time.Now().Unix()-lastRecv.Load() > int64(deadAfter/time.Second) {
+					done()
+					return
+				}
+			}
+		}
+	}()
+
+	if shouldStop != nil {
+		go func() {
+			t := time.NewTicker(2 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					if shouldStop() {
+						reason = "stop"
+						done()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+loop:
+	for {
+		select {
+		case <-stop:
+			break loop
+		default:
+		}
+		raw, err := conn.Receive(time.Second)
+		if err != nil {
+			break
+		}
+		if raw != nil {
+			lastRecv.Store(time.Now().Unix())
+		}
+		if len(raw) == 0 {
+			continue
+		}
+		if c.OnRaw != nil {
+			c.OnRaw(raw)
+		}
+		c.handleIncoming(raw, onMessage)
+	}
+	done()
+	conn.Close()
+	return reason
+}
+
+func (c *Client) handleIncoming(raw []byte, onMessage func(IncomingMessage)) {
+	items := c.extractChatItems(raw, c.CkUid)
+	if len(items) == 0 || onMessage == nil {
+		return
+	}
+	self := strings.TrimSpace(c.CkUid)
+	for _, it := range items {
+		if it.direction == "sent" {
+			continue // 自己发的
+		}
+		if it.senderID != "" && self != "" && strings.TrimSpace(it.senderID) == self {
+			continue
+		}
+		convID := it.convID
+		if convID == "" && !strings.HasPrefix(it.text, "[系统]") {
+			peer := strings.TrimSpace(it.senderID)
+			if isDigits(self) && isDigits(peer) && self != peer {
+				x, y := self, peer
+				if convLess(y, x) {
+					x, y = y, x
+				}
+				convID = "0:1:" + x + ":" + y
+			}
+		}
+		onMessage(IncomingMessage{
+			ConvID: convID, SenderID: it.senderID, SenderMs4: it.senderMs4,
+			Text: it.text, AweType: it.aweType, Image: it.image, Direction: "recv",
+		})
+	}
+}
+
+// BuildConvID 由自己和对方 uid 拼单聊 conv_id（0:1:小:大，按 TS 排序规则）。非法返回 ""。
+func BuildConvID(selfUID, peerUID string) string {
+	self := strings.TrimSpace(selfUID)
+	peer := strings.TrimSpace(peerUID)
+	if !isDigits(self) || !isDigits(peer) || self == peer {
+		return ""
+	}
+	x, y := self, peer
+	if convLess(y, x) {
+		x, y = y, x
+	}
+	return "0:1:" + x + ":" + y
+}
+
+// convLess 复刻 TS 排序：先按长度升序，再字典序。
+func convLess(p, q string) bool {
+	if len(p) != len(q) {
+		return len(p) < len(q)
+	}
+	return p < q
+}
+
+// -- 聊天条目提取（collectChat / parseChatJsonItem）-------------------------
+
+type chatItem struct {
+	direction   string
+	convID      string
+	shortID     uint64
+	serverMsgID uint64
+	senderID    string
+	senderMs4   string
+	text        string
+	aweType     int
+	image       *ImImage
+}
+
+type parsedItem struct {
+	text      string
+	aweType   int
+	direction string
+	image     *ImImage
+}
+
+func (c *Client) extractChatItems(payload []byte, selfUid string) []chatItem {
+	var out []chatItem
+	c.collectChat(decodeTop(payload), &out, "", "", "", selfUid)
+	if len(out) == 0 {
+		c.collectChatFromRawJson(payload, &out, selfUid)
+	}
+	return out
+}
+
+func (c *Client) collectChat(fields []ProtoField, out *[]chatItem, senderID, convID, senderMs4, selfUid string) {
+	// pass 1：拿发送者 / 会话 / sec_uid 上下文
+	for _, f := range fields {
+		if f.Field == 7 && f.Type == "varint" {
+			senderID = strconv.FormatUint(f.VUint, 10)
+		}
+		if f.Field == 7 && f.Type == "string" && isDigits(f.VStr) {
+			senderID = f.VStr
+		}
+		if f.Type == "string" {
+			v := f.VStr
+			if v != "" && strings.HasPrefix(v, "0:1:") && strings.Count(v, ":") == 3 {
+				convID = v
+			} else if f.Field == 1 && v != "" && convID == "" {
+				convID = v
+			}
+		}
+		if f.Field == 14 && f.Type == "string" && strings.HasPrefix(f.VStr, "MS4") {
+			senderMs4 = f.VStr
+		}
+	}
+
+	// pass 2：抠 JSON 条目
+	for _, f := range fields {
+		if f.Type == "string" {
+			fid := f.Field
+			val := f.VStr
+			shouldTry := fid == 6 || fid == 8
+			if !shouldTry && (strings.Contains(val, `"text"`) || strings.Contains(val, "aweType")) {
+				shouldTry = true
+			}
+			if shouldTry {
+				var obj map[string]any
+				if json.Unmarshal([]byte(val), &obj) == nil && obj != nil {
+					if p, ok := c.parseChatJsonItem(obj, senderID, selfUid); ok {
+						*out = append(*out, chatItem{
+							direction: p.direction, convID: convID, senderID: senderID,
+							senderMs4: senderMs4, text: p.text, aweType: p.aweType, image: p.image,
+						})
+					}
+				}
+			}
+		}
+		if f.Type == "message" {
+			c.collectChat(f.VMsg, out, senderID, convID, senderMs4, selfUid)
+		}
+	}
+
+	var shortID uint64
+	for _, path := range [][]int{{8, 6, 500, 5, 5}, {8, 6, 100, 10, 2}, {8, 6, 100, 50, 2}} {
+		if v, ok := searchPath(fields, path); ok {
+			shortID = v
+			break
+		}
+	}
+	serverMsgID, _ := searchPath(fields, []int{8, 6, 500, 5, 3})
+	for i := range *out {
+		if shortID != 0 && (*out)[i].shortID == 0 {
+			(*out)[i].shortID = shortID
+		}
+		if serverMsgID != 0 && (*out)[i].serverMsgID == 0 {
+			(*out)[i].serverMsgID = serverMsgID
+		}
+	}
+}
+
+var reConvID = regexp.MustCompile(`0:1:\d+:\d+`)
+var reJSONChunk = regexp.MustCompile(`\{(?:[^{}]|\{[^{}]*\})*\}`)
+
+// collectChatFromRawJson protobuf 解不出条目时的兜底：直接从裸字节抠 JSON 片段。
+func (c *Client) collectChatFromRawJson(payload []byte, out *[]chatItem, selfUid string) {
+	text := string(payload)
+	convID := reConvID.FindString(text)
+
+	seen := map[string]bool{}
+	for _, chunk := range reJSONChunk.FindAllString(text, -1) {
+		if !strings.Contains(chunk, `"text"`) && !strings.Contains(chunk, "aweType") {
+			continue
+		}
+		var obj map[string]any
+		if json.Unmarshal([]byte(chunk), &obj) != nil || obj == nil {
+			continue
+		}
+		p, ok := c.parseChatJsonItem(obj, "", selfUid)
+		if !ok {
+			continue
+		}
+		key := p.text + "|" + strconv.Itoa(p.aweType)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		*out = append(*out, chatItem{
+			direction: p.direction, convID: convID, text: p.text, aweType: p.aweType, image: p.image,
+		})
+	}
+}
+
+func (c *Client) parseChatJsonItem(obj map[string]any, senderID, selfUid string) (parsedItem, bool) {
+	var text string
+	if t, ok := obj["text"].(string); ok && t != "" {
+		text = t
+	} else {
+		d := c.parseMessageDisplay(obj)
+		if d == "" {
+			return parsedItem{}, false
+		}
+		text = d
+	}
+
+	aweType := toInt(obj["aweType"])
+	sid := strings.TrimSpace(senderID)
+	self := strings.TrimSpace(selfUid)
+	if self == "" {
+		self = strings.TrimSpace(c.CkUid)
+	}
+	isSelf := self != "" && sid != "" && sid == self
+
+	var image *ImImage
+	if aweType == 2702 {
+		if ru, ok := obj["resource_url"].(map[string]any); ok {
+			if skey, _ := ru["skey"].(string); skey != "" {
+				image = &ImImage{
+					Skey:          skey,
+					OriginURLList: strList(ru["origin_url_list"]),
+					LargeURLList:  strList(ru["large_url_list"]),
+					MediumURLList: strList(ru["medium_url_list"]),
+					ThumbURLList:  strList(ru["thumb_url_list"]),
+				}
+				if md5s, ok := ru["md5"].(string); ok {
+					image.Md5 = md5s
+				}
+			}
+		}
+	}
+
+	dir := "recv"
+	if isSelf {
+		dir = "sent"
+	}
+	return parsedItem{text: text, aweType: aweType, direction: dir, image: image}, true
+}
+
+// parseMessageDisplay 各类消息体的展示文案：文本 > 富文本 > 卡片标题 > 提示语。
+func (c *Client) parseMessageDisplay(obj map[string]any) string {
+	if t, ok := obj["text"].(string); ok && t != "" {
+		return t
+	}
+	if content, ok := obj["content"].(string); ok {
+		body := strings.TrimSpace(strings.ReplaceAll(content, "{{web_url}}", ""))
+		if body != "" {
+			return body
+		}
+	}
+	if title, ok := obj["title"]; ok && toStr(title) != "" {
+		var extra any
+		for _, k := range []string{"open_url", "link_url", "desc"} {
+			if v, ok := obj[k]; ok && v != nil {
+				extra = v
+				break
+			}
+		}
+		s := "[卡片] " + toStr(title)
+		if e := toStr(extra); e != "" {
+			s += " | " + e
+		}
+		return s
+	}
+	for _, key := range []string{"push_detail", "desc", "hint", "msgHint"} {
+		if v, ok := obj[key]; ok && toStr(v) != "" {
+			return toStr(v)
+		}
+	}
+	if sm, ok := obj["status_msg"].(map[string]any); ok {
+		if mc, ok := sm["msg_content"].(map[string]any); ok {
+			if tips, ok := mc["tips"]; ok && toStr(tips) != "" {
+				return "[系统] " + toStr(tips)
+			}
+		}
+	}
+	if tips, ok := obj["tips"]; ok && toStr(tips) != "" {
+		return "[系统] " + toStr(tips)
+	}
+	return ""
+}
+
+// -- 组包 + 发送（渠道 1 douyin_main 文本）----------------------------------
+
+type ch1Content struct {
+	Type            int    `json:"type"`
+	InstructionType int    `json:"instruction_type"`
+	ItemTypeLocal   int    `json:"item_type_local"`
+	Text            string `json:"text"`
+	CreatedAt       int    `json:"createdAt"`
+	IsCard          bool   `json:"is_card"`
+	MsgHint         string `json:"msgHint"`
+	AweType         int    `json:"aweType"`
+}
+
+// buildSendMessage 组渠道 1 文本消息帧，返回 (payload, clientMsgId)。
+func (c *Client) buildSendMessage(conversationID string, conversationShortID uint64, text string) ([]byte, string) {
+	seqID := c.nextSeq()
+	ms := time.Now().UnixMilli()
+	clientMsgID := uuid.NewString()
+
+	content := ch1Content{Type: 0, InstructionType: 0, ItemTypeLocal: -1, Text: text, CreatedAt: 0, IsCard: false, MsgHint: "", AweType: 700}
+	contentJSON := jsonNoEscape(content)
+
+	ext := [][2]string{
+		{"s:ticket_mode", "0"},
+		{"im_client_send_msg_time", strconv.FormatInt(ms-500, 10)},
+		{"a:plv", "1"},
+		{"a:access", "douyin_main"},
+		{"s:biz_aid", awemeAID},
+		{"chat_scene", "normal"},
+		{"a:msg_scene", "1"},
+		{"im_sdk_client_send_msg_time", strconv.FormatInt(ms-375, 10)},
+		{"a:relation_type", "0:0"},
+		{"a:smp_token_fetch", "11"},
+		{"a:ntp_ready", "2"},
+		{"s:sync_2_newdx", "1"},
+		{"old_client_message_id", strconv.FormatInt(ms, 10)},
+		{"s:mode", "0"},
+		{"a:enter_method", "click_message"},
+		{"a:biz", "douyin"},
+		{"s:is_stranger", "false"},
+		{"source_aid", awemeAID},
+		{"s:saas_sdk", "false"},
+		{"a:sync2dx", "1"},
+		{"s:refer", "3"},
+	}
+	ext12 := [][2]string{
+		{"s:reverse_creator_im_ex", "0"},
+		{"a:from_role_ids", ""},
+		{"s:im_creator_chat_opt_exp", "0"},
+		{"s:send_ignore_ticket", "true"},
+		{"s:im_chat_priv_opt_exp", "1"},
+		{"a:to_role_ids", "[]"},
+	}
+
+	var field100 []byte
+	field100 = append(field100, encodeLenDelimS(1, conversationID)...)
+	field100 = append(field100, encodeFieldVarint(2, 1)...)
+	field100 = append(field100, encodeFieldVarint(3, conversationShortID)...)
+	field100 = append(field100, encodeLenDelimS(4, contentJSON)...)
+	for _, kv := range ext {
+		field100 = append(field100, encodeKvPair(5, kv[0], kv[1])...)
+	}
+	field100 = append(field100, encodeFieldVarint(6, 7)...)
+	field100 = append(field100, encodeLenDelimS(8, clientMsgID)...)
+	for _, kv := range ext12 {
+		field100 = append(field100, encodeKvPair(12, kv[0], kv[1])...)
+	}
+
+	msgWrapper := encodeLenDelim(100, field100)
+	inner := c.buildAndroidCmd100Inner(msgWrapper, seqID, "douyin", "douyin_main")
+	payload := c.wrapAndroidCmd100Outer(inner, seqID, ms)
+	return payload, clientMsgID
+}
+
+func (c *Client) buildAndroidCmd100Inner(msgWrapper []byte, seqID int, biz, access string) []byte {
+	deviceID := c.CkUid
+	parts := concat(
+		encodeFieldVarint(1, 100),
+		encodeFieldVarint(2, uint64(seqID)),
+		encodeLenDelimS(3, awemeSDKVersion),
+		encodeFieldVarint(5, 1),
+		encodeFieldVarint(6, 0),
+		encodeLenDelimS(7, awemeBuildNumber),
+		encodeLenDelim(8, msgWrapper),
+		encodeLenDelimS(9, deviceID),
+		encodeLenDelimS(10, awemeChannel),
+		encodeLenDelimS(11, "android"),
+		encodeLenDelimS(12, awemeDeviceType),
+		encodeLenDelimS(13, awemeOSVersion),
+		encodeLenDelimS(14, awemeVersionCode),
+	)
+	for _, kv := range [][2]string{
+		{"app_name", awemeAppName}, {"iid", deviceID}, {"version_code", awemeVersionCode},
+		{"net_mcc_mnc", "46000"}, {"aid", awemeAID}, {"flow-tag", "new"}, {"user-agent", awemeUA},
+	} {
+		parts = append(parts, encodeKvPair(15, kv[0], kv[1])...)
+	}
+	parts = append(parts, encodeFieldVarint(18, 0)...)
+	parts = append(parts, encodeLenDelimS(21, biz)...)
+	parts = append(parts, encodeLenDelimS(22, access)...)
+	return parts
+}
+
+func (c *Client) wrapAndroidCmd100Outer(inner []byte, seqID int, timestampMs int64) []byte {
+	return concat(
+		encodeFieldVarint(1, uint64(seqID)),
+		encodeFieldVarint(2, uint64(timestampMs)),
+		encodeFieldVarint(3, 5),
+		encodeFieldVarint(4, 1),
+		encodeKvPair(5, "msg_type", "cmd100"),
+		encodeKvPair(5, "seq_id", strconv.Itoa(seqID)),
+		encodeKvPair(5, "cmd", "100"),
+		encodeKvPair(5, "is-retry", "0"),
+		encodeKvPair(5, "flow-tag", "new"),
+		encodeLenDelimS(6, "pb"),
+		encodeLenDelimS(7, "pb"),
+		encodeLenDelim(8, inner),
+	)
+}
+
+// SendResult 发送返回（对应网关 API 的 data）。
+type SendResult struct {
+	ClientMsgID string `json:"client_msg_id"`
+	ServerMsgID string `json:"server_msg_id"`
+	PrevMsgID   string `json:"prev_msg_id"`
+	ConvID      string `json:"conv_id"`
+	ConvShortID string `json:"conversation_short_id"`
+	SelfUID     string `json:"self_uid"`
+}
+
+// SendTextResult 发 HTTP 文本消息（imapi /v1/message/send），返回 client_msg_id / server_msg_id 等。
+func (c *Client) SendTextResult(conversationID, text string) (SendResult, error) {
+	return c.SendTextEx(conversationID, 0, text)
+}
+
+// SendTextEx 发文本，可带会话短 ID（回复已知会话时带上更稳；0 表示不带）。
+func (c *Client) SendTextEx(conversationID string, shortID uint64, text string) (SendResult, error) {
+	content := jsonNoEscape(imapiTextContent{AweType: 700, Type: 0, RichTextInfos: []any{}, Text: text})
+	return c.sendIMAPI(conversationID, shortID, content)
+}
+
+// SendImageResult 发图片（先 UploadImage 拿 ImageAsset）。走同一个 imapi 发送通道，只是 content 不同。
+func (c *Client) SendImageResult(conversationID string, shortID uint64, img ImageAsset) (SendResult, error) {
+	var content imapiImageContent
+	content.ResourceURL.Oid = img.Oid
+	content.ResourceURL.Skey = img.Skey
+	content.ResourceURL.DataSize = img.DataSize
+	content.ResourceURL.Md5 = img.Md5
+	content.CoverHeight = img.CoverHeight
+	content.CoverWidth = img.CoverWidth
+	content.CheckPics = []any{}
+	content.Md5 = img.Md5
+	content.FromGallery = 1
+	content.AweType = 2702
+	return c.sendIMAPI(conversationID, shortID, jsonNoEscape(content))
+}
+
+// SendText 发一条文本。
+func (c *Client) SendText(conversationID, text string) error {
+	_, err := c.SendTextResult(conversationID, text)
+	return err
+}
+
+// -- 小工具 -----------------------------------------------------------------
+
+func rawURLEncode(s string) string {
+	const hexd = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+			ch == '-' || ch == '_' || ch == '.' || ch == '~' {
+			b.WriteByte(ch)
+		} else {
+			b.WriteByte('%')
+			b.WriteByte(hexd[ch>>4])
+			b.WriteByte(hexd[ch&0xf])
+		}
+	}
+	return b.String()
+}
+
+func jsonNoEscape(v any) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+	return strings.TrimRight(buf.String(), "\n")
+}
+
+func parseCookies(cookie string) map[string]string {
+	m := map[string]string{}
+	for _, part := range strings.Split(cookie, ";") {
+		p := strings.TrimSpace(part)
+		if p == "" || !strings.Contains(p, "=") {
+			continue
+		}
+		i := strings.Index(p, "=")
+		m[strings.TrimSpace(p[:i])] = p[i+1:]
+	}
+	return m
+}
+
+func uriDecode(s string) string {
+	if d, err := url.PathUnescape(s); err == nil {
+		return d
+	}
+	return s
+}
+
+func strList(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, e := range arr {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}

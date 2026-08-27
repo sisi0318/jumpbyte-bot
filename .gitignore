@@ -1,0 +1,12 @@
+cookie*.json
+bot.json
+qrcode.png
+*.db
+*.sqlite
+*.sqlite3
+dist/
+*.txt
+har/
+*.bin
+*.json
+qr.b64
