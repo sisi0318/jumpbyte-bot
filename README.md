@@ -1,8 +1,5 @@
 # jumpbyte-bot
 
-私信 bot，Go 单静态二进制。扫码登录，收发私信（文本 / 图片 / 视频 / 表情 / 回复 / 撤回），
-对外暴露本地 HTTP + WebSocket 网关供其它程序对接。纯 Go，无 CGO，不依赖 Node / Python。
-
 ## 功能
 
 - 扫码登录（含短信二次验证），cookie 失效自动重新登录
