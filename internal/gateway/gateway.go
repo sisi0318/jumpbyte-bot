@@ -113,6 +113,7 @@ type Sender interface {
 	SendVideoResult(convID string, shortID uint64, videoBytes, coverBytes []byte, width, height int) (engine.SendResult, error)
 	Recall(convID string, shortID, serverMsgID uint64) error
 	UploadImage(imageBytes []byte) (engine.ImageAsset, error)
+	ResolveVideoURL(tkey string) (engine.VideoURL, error)
 }
 
 // Gateway 单账号网关。
@@ -246,7 +247,22 @@ func (g *Gateway) EmitMessage(m engine.IncomingMessage) {
 	if m.Image != nil {
 		ev["image"] = imageEvent(m.Image)
 	}
+	if m.Video != nil {
+		ev["video"] = videoEvent(m.Video)
+	}
 	g.broadcast(ev)
+}
+
+// videoEvent 视频事件对象：tkey/skey + 封面 poster（带解密链接）。可播 URL 用 get_video_url 动作换。
+func videoEvent(v *engine.ImVideo) map[string]any {
+	ev := map[string]any{
+		"tkey": v.Tkey, "skey": v.Skey, "md5": v.Md5,
+		"width": v.Width, "height": v.Height, "check_pics": v.CheckPics,
+	}
+	if v.Poster != nil {
+		ev["poster"] = imageEvent(v.Poster)
+	}
+	return ev
 }
 
 // imageEvent 把图片资源摊平成事件里的 image 对象：原始各档 url + 拿来即用的解密代理链接。
@@ -436,7 +452,7 @@ func (g *Gateway) handleAPI(w http.ResponseWriter, r *http.Request) {
 func knownAction(name string) bool {
 	switch name {
 	case "get_accounts", "send_text", "send_card", "send_action_card",
-		"send_emoji", "send_image", "send_reply", "send_video", "upload_image", "recall":
+		"send_emoji", "send_image", "send_reply", "send_video", "upload_image", "recall", "get_video_url":
 		return true
 	}
 	return false
@@ -473,6 +489,8 @@ func (g *Gateway) dispatch(name string, in map[string]any) any {
 		return g.actionSendVideo(in)
 	case "recall":
 		return g.actionRecall(in)
+	case "get_video_url":
+		return g.actionGetVideoURL(in)
 	default:
 		// send_card / send_action_card
 		return errMsg(500, "Go 版网关暂未实现该动作："+name)
@@ -543,6 +561,18 @@ func (g *Gateway) actionSendReply(in map[string]any) any {
 		return errMsg(500, err.Error())
 	}
 	return okData(res)
+}
+
+func (g *Gateway) actionGetVideoURL(in map[string]any) any {
+	tkey := getStr(in, "tkey")
+	if tkey == "" {
+		return errMsg(400, "缺少 tkey（视频消息里的 video.tkey）")
+	}
+	u, err := g.eng.ResolveVideoURL(tkey)
+	if err != nil {
+		return errMsg(500, err.Error())
+	}
+	return okData(map[string]any{"main_url": u.MainURL, "backup_url": u.BackupURL, "expire_time": u.ExpireTime})
 }
 
 func (g *Gateway) actionRecall(in map[string]any) any {

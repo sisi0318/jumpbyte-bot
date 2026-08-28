@@ -64,6 +64,17 @@ func (im *ImImage) PickURL() string {
 	return ""
 }
 
+// ImVideo 视频消息资源。视频流用 tkey 走 batch_play_info 换可播 URL；poster 是封面图（可解密）。
+type ImVideo struct {
+	Tkey      string
+	Skey      string
+	Md5       string
+	Width     int
+	Height    int
+	CheckPics []string
+	Poster    *ImImage
+}
+
 // IncomingMessage 投递给上层的一条收到的消息。
 type IncomingMessage struct {
 	ConvID    string
@@ -72,6 +83,7 @@ type IncomingMessage struct {
 	Text      string
 	AweType   int
 	Image     *ImImage
+	Video     *ImVideo
 	Direction string // 目前只投递 recv
 }
 
@@ -275,7 +287,7 @@ func (c *Client) handleIncoming(raw []byte, onMessage func(IncomingMessage)) {
 		}
 		onMessage(IncomingMessage{
 			ConvID: convID, SenderID: it.senderID, SenderMs4: it.senderMs4,
-			Text: it.text, AweType: it.aweType, Image: it.image, Direction: it.direction,
+			Text: it.text, AweType: it.aweType, Image: it.image, Video: it.video, Direction: it.direction,
 		})
 	}
 }
@@ -314,6 +326,7 @@ type chatItem struct {
 	text        string
 	aweType     int
 	image       *ImImage
+	video       *ImVideo
 }
 
 type parsedItem struct {
@@ -321,6 +334,7 @@ type parsedItem struct {
 	aweType   int
 	direction string
 	image     *ImImage
+	video     *ImVideo
 }
 
 func (c *Client) extractChatItems(payload []byte, selfUid string) []chatItem {
@@ -360,7 +374,7 @@ func (c *Client) collectChat(fields []ProtoField, out *[]chatItem, senderID, con
 			fid := f.Field
 			val := f.VStr
 			shouldTry := fid == 6 || fid == 8
-			if !shouldTry && (strings.Contains(val, `"text"`) || strings.Contains(val, "aweType")) {
+			if !shouldTry && (strings.Contains(val, `"text"`) || strings.Contains(val, "aweType") || strings.Contains(val, "tkey")) {
 				shouldTry = true
 			}
 			if shouldTry {
@@ -369,7 +383,7 @@ func (c *Client) collectChat(fields []ProtoField, out *[]chatItem, senderID, con
 					if p, ok := c.parseChatJsonItem(obj, senderID, selfUid); ok {
 						*out = append(*out, chatItem{
 							direction: p.direction, convID: convID, senderID: senderID,
-							senderMs4: senderMs4, text: p.text, aweType: p.aweType, image: p.image,
+							senderMs4: senderMs4, text: p.text, aweType: p.aweType, image: p.image, video: p.video,
 						})
 					}
 				}
@@ -408,7 +422,7 @@ func (c *Client) collectChatFromRawJson(payload []byte, out *[]chatItem, selfUid
 
 	seen := map[string]bool{}
 	for _, chunk := range reJSONChunk.FindAllString(text, -1) {
-		if !strings.Contains(chunk, `"text"`) && !strings.Contains(chunk, "aweType") {
+		if !strings.Contains(chunk, `"text"`) && !strings.Contains(chunk, "aweType") && !strings.Contains(chunk, "tkey") {
 			continue
 		}
 		var obj map[string]any
@@ -425,44 +439,71 @@ func (c *Client) collectChatFromRawJson(payload []byte, out *[]chatItem, selfUid
 		}
 		seen[key] = true
 		*out = append(*out, chatItem{
-			direction: p.direction, convID: convID, text: p.text, aweType: p.aweType, image: p.image,
+			direction: p.direction, convID: convID, text: p.text, aweType: p.aweType, image: p.image, video: p.video,
 		})
+	}
+}
+
+// parseImageRes 从 resource_url / poster 风格的 map 抠出 ImImage（cover_w/h 从 outer 取）。
+func parseImageRes(ru, outer map[string]any) *ImImage {
+	skey, _ := ru["skey"].(string)
+	if skey == "" {
+		return nil
+	}
+	oid, _ := ru["oid"].(string)
+	md5s, _ := ru["md5"].(string)
+	return &ImImage{
+		Skey: skey, Oid: oid, Md5: md5s,
+		DataSize:      toInt(ru["data_size"]),
+		CoverWidth:    toInt(outer["cover_width"]),
+		CoverHeight:   toInt(outer["cover_height"]),
+		OriginURLList: strList(ru["origin_url_list"]),
+		LargeURLList:  strList(ru["large_url_list"]),
+		MediumURLList: strList(ru["medium_url_list"]),
+		ThumbURLList:  strList(ru["thumb_url_list"]),
 	}
 }
 
 func (c *Client) parseChatJsonItem(obj map[string]any, senderID, selfUid string) (parsedItem, bool) {
 	aweType := toInt(obj["aweType"])
 
-	// 先抠图片：纯图片消息往往没有 text 字段，必须在"文本判空"之前处理，否则会被丢掉。
+	// 先抠图片/视频：这类消息往往没有 text 字段，必须在"文本判空"之前处理，否则会被丢掉。
 	var image *ImImage
 	if aweType == 2702 {
 		if ru, ok := obj["resource_url"].(map[string]any); ok {
-			if skey, _ := ru["skey"].(string); skey != "" {
-				oid, _ := ru["oid"].(string)
-				md5s, _ := ru["md5"].(string)
-				image = &ImImage{
-					Skey:          skey,
-					Oid:           oid,
-					Md5:           md5s,
-					DataSize:      toInt(ru["data_size"]),
-					CoverWidth:    toInt(obj["cover_width"]),
-					CoverHeight:   toInt(obj["cover_height"]),
-					OriginURLList: strList(ru["origin_url_list"]),
-					LargeURLList:  strList(ru["large_url_list"]),
-					MediumURLList: strList(ru["medium_url_list"]),
-					ThumbURLList:  strList(ru["thumb_url_list"]),
-				}
+			image = parseImageRes(ru, obj)
+		}
+	}
+
+	// 视频：content 里没有 aweType，靠 video.tkey 识别；poster 是封面图（可解密）。
+	var video *ImVideo
+	if v, ok := obj["video"].(map[string]any); ok {
+		if tkey, _ := v["tkey"].(string); tkey != "" {
+			skey, _ := v["skey"].(string)
+			md5s, _ := v["md5"].(string)
+			video = &ImVideo{
+				Tkey: tkey, Skey: skey, Md5: md5s,
+				Width: toInt(obj["width"]), Height: toInt(obj["height"]),
+				CheckPics: strList(obj["check_pics"]),
+			}
+			if p, ok := obj["poster"].(map[string]any); ok {
+				video.Poster = parseImageRes(p, p)
 			}
 		}
 	}
 
-	// 文本：text > 展示文案 > 图片占位
+	// 文本：text > 展示文案 > 视频/图片占位
 	text, _ := obj["text"].(string)
 	if text == "" {
 		text = c.parseMessageDisplay(obj)
 	}
-	if text == "" && image != nil {
-		text = "[图片]"
+	if text == "" {
+		switch {
+		case video != nil:
+			text = "[视频]"
+		case image != nil:
+			text = "[图片]"
+		}
 	}
 	if text == "" {
 		return parsedItem{}, false
@@ -477,7 +518,7 @@ func (c *Client) parseChatJsonItem(obj map[string]any, senderID, selfUid string)
 	if self != "" && sid != "" && sid == self {
 		dir = "sent"
 	}
-	return parsedItem{text: text, aweType: aweType, direction: dir, image: image}, true
+	return parsedItem{text: text, aweType: aweType, direction: dir, image: image, video: video}, true
 }
 
 // parseMessageDisplay 各类消息体的展示文案：文本 > 富文本 > 卡片标题 > 提示语。

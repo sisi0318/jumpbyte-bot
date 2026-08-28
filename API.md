@@ -215,6 +215,26 @@ curl -s -X POST $BASE/api/recall -H "Authorization: Bearer $TOKEN" \
 
 返回 `{"code":0,"data":{"ok":true,"conv_id":"…"}}`。
 
+### `get_video_url` —— 取视频播放地址
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `tkey` | ✅ | 视频消息里的 `video.tkey` |
+
+```bash
+curl -s -X POST $BASE/api/get_video_url -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"tkey":"tos-cn-o-00061/…"}'
+```
+
+```jsonc
+{ "code": 0, "data": {
+  "main_url": "https://…douyinvod.com/…", "backup_url": "https://…",
+  "expire_time": 1787908673
+} }
+```
+
+> `main_url` 指向的视频流仍是加密的（key = 消息里的 `video.skey`）；本项目暂不内置视频解密。
+
 ### `GET /health`
 
 免令牌。
@@ -264,6 +284,19 @@ curl -s $BASE/health
 ```
 
 拿 `conv_id` 调 `send_text` 就是回复，调 `send_reply` 就是引用回复。
+
+**视频消息**带 `video`（无 `image`）：
+
+```jsonc
+"video": {
+  "tkey": "tos-cn-o-00061/…",      // 视频 key，换播放地址用（见 get_video_url）
+  "skey": "…",                     // 视频流解密 key
+  "md5": "…",
+  "width": 720, "height": 1280,
+  "check_pics": ["tos-cn-o-0812/…"],
+  "poster": { … }                  // 封面图，结构同 image（带 links 解密链接）
+}
+```
 
 ### `connect` / `disconnect`
 

@@ -55,6 +55,10 @@ func (f *fakeSender) Recall(conv string, short, smid uint64) error {
 	return nil
 }
 
+func (f *fakeSender) ResolveVideoURL(tkey string) (engine.VideoURL, error) {
+	return engine.VideoURL{MainURL: "https://v/main?tkey=" + tkey}, nil
+}
+
 func newTestGW() (*Gateway, *fakeSender) {
 	cfg := &config.BotConfig{Host: "127.0.0.1", Port: 0, Token: "tok123"}
 	acc := &config.Account{ID: "main", Name: "主号", UID: "1000", Enabled: true}

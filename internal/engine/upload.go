@@ -74,24 +74,7 @@ func (c *Client) UploadImage(imageBytes []byte) (ImageAsset, error) {
 // getUploadConfig GET config/v2 拿 STS 凭证 + space_name（cookie 鉴权，无 a_bogus）。
 func (c *Client) getUploadConfig() (stsCreds, error) {
 	var cr stsCreds
-	dev := c.deviceID()
-	q := [][2]string{
-		{"aid", "339757"}, {"version_name", "1.1.33"}, {"version_code", "1.1.33"},
-		{"device_platform", "win32"}, {"os_version", "10.0.26200"},
-		{"screen_width", "1707"}, {"screen_height", "1067"},
-		{"browser_language", "zh-CN"}, {"browser_platform", "Win32"}, {"browser_name", "Mozilla"},
-		{"browser_version", strings.TrimPrefix(pcUA, "Mozilla/")}, {"browser_online", "true"}, {"cookie_enabled", "true"},
-		{"device_id", dev}, {"did", dev}, {"iid", "0"},
-		{"awemeim_guid", strings.ReplaceAll(uuid.NewString(), "-", "")}, {"channel", "0"},
-	}
-	var sb strings.Builder
-	for i, kv := range q {
-		if i > 0 {
-			sb.WriteByte('&')
-		}
-		sb.WriteString(kv[0] + "=" + rawURLEncode(kv[1]))
-	}
-	req, _ := http.NewRequest("GET", uploadConfigURL+"?"+sb.String(), nil)
+	req, _ := http.NewRequest("GET", uploadConfigURL+"?"+c.pcFingerprintQuery(), nil)
 	req.Header.Set("User-Agent", pcUA)
 	req.Header.Set("Cookie", c.Cookie)
 	req.Header.Set("Referer", "https://www.douyin.com/")

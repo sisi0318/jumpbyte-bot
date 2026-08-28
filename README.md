@@ -3,7 +3,7 @@
 ## 功能
 
 - 扫码登录（含短信二次验证），cookie 失效自动重新登录
-- 收私信：文本、图片（自动解密）
+- 收私信：文本、图片（自动解密）、视频（换取播放地址）
 - 发私信：文本、图片、视频、表情、引用回复
 - 撤回消息
 - HTTP 接口发消息 + WebSocket 推事件（见 [API.md](API.md)）
@@ -67,7 +67,7 @@ jumpbyte-bot --smoke      给自己发一条测试消息，验证收发联机
 | `ws /oriws?access_token=<token>` | 原始 protobuf 帧（base64 + 解码树），调试 / 逆向新消息类型 |
 | `GET /health` | 存活与账号状态，免鉴权 |
 
-动作：`send_text`、`send_image`、`upload_image`、`send_video`、`send_emoji`、`send_reply`、`recall`、`get_accounts`。字段与示例见 [API.md](API.md)。
+动作：`send_text`、`send_image`、`upload_image`、`send_video`、`send_emoji`、`send_reply`、`recall`、`get_video_url`、`get_accounts`。字段与示例见 [API.md](API.md)。
 
 跑起来的终端也可直接输入 `@<conv_id> <文本>` 回车发消息。
 
