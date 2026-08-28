@@ -7,6 +7,7 @@
 package gateway
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -152,6 +153,7 @@ func (g *Gateway) handler() http.Handler {
 	mux.HandleFunc("/oriws", g.handleOriWs)
 	mux.HandleFunc("/health", g.handleHealth)
 	mux.HandleFunc("/img", media.ImageHandler) // 图片解密代理，共用本端口
+	mux.HandleFunc("/video", g.handleVideo)    // 视频解密代理，共用本端口
 	mux.HandleFunc("/api/", g.handleAPI)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, errMsg(404, "unknown path"))
@@ -253,11 +255,13 @@ func (g *Gateway) EmitMessage(m engine.IncomingMessage) {
 	g.broadcast(ev)
 }
 
-// videoEvent 视频事件对象：tkey/skey + 封面 poster（带解密链接）。可播 URL 用 get_video_url 动作换。
+// videoEvent 视频事件对象：tkey/skey + 封面 poster（带解密链接）+ play_url（拿来即播的本地解密代理）。
+// 原始可播 CDN 地址（仍是 CENC 密文）用 get_video_url 动作换。
 func videoEvent(v *engine.ImVideo) map[string]any {
 	ev := map[string]any{
 		"tkey": v.Tkey, "skey": v.Skey, "md5": v.Md5,
 		"width": v.Width, "height": v.Height, "check_pics": v.CheckPics,
+		"play_url": media.VideoLink(v.Tkey, v.Skey), // 本地解密代理，<video src> 直接可播
 	}
 	if v.Poster != nil {
 		ev["poster"] = imageEvent(v.Poster)
@@ -420,6 +424,31 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"protocol": protocolVersion, "bots": bots, "accounts": g.list()}})
 }
 
+// handleVideo /video?tkey=&skey= 视频解密代理：tkey 换 CDN 地址 → 下载 CENC MP4 → skey 解密 → 出明文可播 MP4。
+// 免鉴权（<video> 带不了 header）；下载地址由服务端用 tkey 换得，非调用方任意 URL，故无 SSRF 面。
+// 用 ServeContent 支持 Range，播放器可拖动进度。
+func (g *Gateway) handleVideo(w http.ResponseWriter, r *http.Request) {
+	tkey := strings.TrimSpace(r.URL.Query().Get("tkey"))
+	skey := strings.TrimSpace(r.URL.Query().Get("skey"))
+	if tkey == "" || skey == "" {
+		http.Error(w, "need tkey & skey", http.StatusBadRequest)
+		return
+	}
+	u, err := g.eng.ResolveVideoURL(tkey)
+	if err != nil {
+		http.Error(w, "resolve: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	data, err := media.FetchVideoAndDecrypt(u.MainURL, u.BackupURL, skey)
+	if err != nil {
+		http.Error(w, "err: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	http.ServeContent(w, r, "video.mp4", time.Time{}, bytes.NewReader(data))
+}
+
 func (g *Gateway) handleAPI(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/")
 	if !knownAction(name) {
@@ -572,7 +601,11 @@ func (g *Gateway) actionGetVideoURL(in map[string]any) any {
 	if err != nil {
 		return errMsg(500, err.Error())
 	}
-	return okData(map[string]any{"main_url": u.MainURL, "backup_url": u.BackupURL, "expire_time": u.ExpireTime})
+	// main_url/backup_url 仍是 CENC 密文；给了 skey 就一并回本地解密代理链接（拿来即播）。
+	return okData(map[string]any{
+		"main_url": u.MainURL, "backup_url": u.BackupURL, "expire_time": u.ExpireTime,
+		"play_url": media.VideoLink(tkey, getStr(in, "skey")),
+	})
 }
 
 func (g *Gateway) actionRecall(in map[string]any) any {

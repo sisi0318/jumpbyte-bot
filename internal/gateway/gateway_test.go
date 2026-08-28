@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,12 +14,16 @@ import (
 
 	"gobot/internal/config"
 	"gobot/internal/engine"
+	"gobot/internal/media"
 )
 
 type fakeSender struct {
 	lastConv, lastText string
 	lastShort          uint64
 	lastImg            engine.ImageAsset
+	lastTkey           string
+	resolveURL         engine.VideoURL
+	resolveErr         error
 }
 
 func (f *fakeSender) SendTextEx(conv string, short uint64, text string) (engine.SendResult, error) {
@@ -56,6 +61,13 @@ func (f *fakeSender) Recall(conv string, short, smid uint64) error {
 }
 
 func (f *fakeSender) ResolveVideoURL(tkey string) (engine.VideoURL, error) {
+	f.lastTkey = tkey
+	if f.resolveErr != nil {
+		return engine.VideoURL{}, f.resolveErr
+	}
+	if f.resolveURL.MainURL != "" {
+		return f.resolveURL, nil
+	}
 	return engine.VideoURL{MainURL: "https://v/main?tkey=" + tkey}, nil
 }
 
@@ -276,6 +288,58 @@ func TestEmitSelf(t *testing.T) {
 	_ = cOff.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	if _, _, err := cOff.ReadMessage(); err == nil {
 		t.Fatal("emit_self=false 不该推 message_self")
+	}
+}
+
+// /video 代理：缺参 400；tkey 换址失败 502。（下载+解密的正路在 media 包用真样本测。）
+func TestVideoProxyValidation(t *testing.T) {
+	g, fs := newTestGW()
+	ts := httptest.NewServer(g.handler())
+	defer ts.Close()
+
+	r1, err := http.Get(ts.URL + "/video")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusBadRequest {
+		t.Fatalf("缺参应 400，got %d", r1.StatusCode)
+	}
+
+	fs.resolveErr = errors.New("boom")
+	r2, err := http.Get(ts.URL + "/video?tkey=t&skey=k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusBadGateway {
+		t.Fatalf("换址失败应 502，got %d", r2.StatusCode)
+	}
+	if fs.lastTkey != "t" {
+		t.Fatalf("tkey 未透传: %q", fs.lastTkey)
+	}
+}
+
+// get_video_url 给了 skey 时应回本地解密代理 play_url。
+func TestGetVideoURLPlayLink(t *testing.T) {
+	media.SetProxyBase("http://127.0.0.1:9999")
+	defer media.SetProxyBase("")
+	g, fs := newTestGW()
+	fs.resolveURL = engine.VideoURL{MainURL: "https://cdn/main", BackupURL: "https://cdn/bak", ExpireTime: 123}
+	ts := httptest.NewServer(g.handler())
+	defer ts.Close()
+
+	code, m := post(t, ts.URL, "/api/get_video_url", "tok123", `{"tkey":"tk1","skey":"sk1"}`)
+	if code != 200 {
+		t.Fatalf("got %d %v", code, m)
+	}
+	data := m["data"].(map[string]any)
+	if data["main_url"] != "https://cdn/main" {
+		t.Fatalf("main_url: %v", data["main_url"])
+	}
+	pl, _ := data["play_url"].(string)
+	if !strings.HasSuffix(pl, "/video?tkey=tk1&skey=sk1") {
+		t.Fatalf("play_url 不对: %q", pl)
 	}
 }
 

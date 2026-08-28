@@ -220,20 +220,35 @@ curl -s -X POST $BASE/api/recall -H "Authorization: Bearer $TOKEN" \
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `tkey` | ✅ | 视频消息里的 `video.tkey` |
+| `skey` | ⭕ | 视频消息里的 `video.skey`；给了就一并回本地解密 `play_url` |
 
 ```bash
 curl -s -X POST $BASE/api/get_video_url -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"tkey":"tos-cn-o-00061/…"}'
+  -H "Content-Type: application/json" -d '{"tkey":"tos-cn-o-00061/…","skey":"051d…"}'
 ```
 
 ```jsonc
 { "code": 0, "data": {
   "main_url": "https://…douyinvod.com/…", "backup_url": "https://…",
-  "expire_time": 1787908673
+  "expire_time": 1787908673,
+  "play_url": "http://127.0.0.1:9503/video?tkey=…&skey=…"   // 拿来即播的明文 MP4（需传 skey）
 } }
 ```
 
-> `main_url` 指向的视频流仍是加密的（key = 消息里的 `video.skey`）；本项目暂不内置视频解密。
+> `main_url`/`backup_url` 指向的视频流仍是 CENC 加密（`cenc-aes-ctr`，key = `video.skey`）。
+> `play_url` 是本地解密代理：打开即得明文可播 MP4，无需自己解密。
+
+### `GET /video` —— 视频解密代理
+
+免令牌（`<video src>` 带不了 header）。用 `tkey` 换 CDN 地址、下载 CENC MP4、用 `skey`
+解密（AES-128-CTR 子样本），出明文可播 MP4；支持 Range，播放器可拖动进度。
+
+```
+GET /video?tkey=<video.tkey>&skey=<video.skey>
+```
+
+事件里的 `video.play_url` 已拼好此链接，直接丢给 `<video>` 或 ffplay 即可。
+下载地址由服务端用 `tkey` 换得（非调用方任意 URL），无 SSRF 面。
 
 ### `GET /health`
 
@@ -290,10 +305,11 @@ curl -s $BASE/health
 ```jsonc
 "video": {
   "tkey": "tos-cn-o-00061/…",      // 视频 key，换播放地址用（见 get_video_url）
-  "skey": "…",                     // 视频流解密 key
+  "skey": "…",                     // 视频流解密 key（CENC AES-128-CTR）
   "md5": "…",
   "width": 720, "height": 1280,
   "check_pics": ["tos-cn-o-0812/…"],
+  "play_url": "http://127.0.0.1:9503/video?tkey=…&skey=…",  // 拿来即播的明文 MP4
   "poster": { … }                  // 封面图，结构同 image（带 links 解密链接）
 }
 ```

@@ -3,7 +3,7 @@
 ## 功能
 
 - 扫码登录（含短信二次验证），cookie 失效自动重新登录
-- 收私信：文本、图片（自动解密）、视频（换取播放地址）
+- 收私信：文本、图片（自动解密）、视频（CENC 自动解密，`play_url` 拿来即播）
 - 发私信：文本、图片、视频、表情、引用回复
 - 撤回消息
 - HTTP 接口发消息 + WebSocket 推事件（见 [API.md](API.md)）
@@ -107,7 +107,7 @@ internal/
     imactions.go     撤回 / 表情 / 回复
     upload.go        图片上传（SigV4 → TOS）
     video.go         视频分片上传
-  media            图片 AES-256-GCM 解密 + 本地代理
+  media            图片 AES-256-GCM 解密 + 视频 CENC(AES-128-CTR) 解密 + 本地代理
   webapi           昵称解析（带缓存）
   store            sqlite 昵称缓存
   gateway          HTTP + WS 网关
