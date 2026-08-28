@@ -244,10 +244,36 @@ func (g *Gateway) EmitMessage(m engine.IncomingMessage) {
 		"conv_id": m.ConvID, "sender_id": m.SenderID, "sender_sec_uid": m.SenderMs4, "text": m.Text,
 	}
 	if m.Image != nil {
-		raw := m.Image.PickURL()
-		ev["image"] = map[string]any{"url": raw, "skey": m.Image.Skey, "link": media.ImageLink(raw, m.Image.Skey)}
+		ev["image"] = imageEvent(m.Image)
 	}
 	g.broadcast(ev)
+}
+
+// imageEvent 把图片资源摊平成事件里的 image 对象：原始各档 url + 拿来即用的解密代理链接。
+func imageEvent(im *engine.ImImage) map[string]any {
+	linkOf := func(list []string) string {
+		if len(list) > 0 {
+			return media.ImageLink(list[0], im.Skey)
+		}
+		return ""
+	}
+	primary := im.PickURL()
+	return map[string]any{
+		"oid": im.Oid, "skey": im.Skey, "md5": im.Md5,
+		"data_size": im.DataSize, "cover_width": im.CoverWidth, "cover_height": im.CoverHeight,
+		"url":             primary,                           // 主 url（origin 优先），兼容旧字段
+		"link":            media.ImageLink(primary, im.Skey), // 主解密链接，兼容旧字段
+		"origin_url_list": im.OriginURLList,
+		"large_url_list":  im.LargeURLList,
+		"medium_url_list": im.MediumURLList,
+		"thumb_url_list":  im.ThumbURLList,
+		"links": map[string]any{ // 各档解密代理链接
+			"origin": linkOf(im.OriginURLList),
+			"large":  linkOf(im.LargeURLList),
+			"medium": linkOf(im.MediumURLList),
+			"thumb":  linkOf(im.ThumbURLList),
+		},
+	}
 }
 
 // EmitConnect 推账号已连接。

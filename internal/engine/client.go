@@ -43,11 +43,15 @@ const (
 // ImImage 图片消息（aweType 2702）资源，供下载 + AES-256-GCM(key=skey) 解密。
 type ImImage struct {
 	Skey          string
+	Oid           string
+	Md5           string
+	DataSize      int
+	CoverWidth    int
+	CoverHeight   int
 	OriginURLList []string
 	LargeURLList  []string
 	MediumURLList []string
 	ThumbURLList  []string
-	Md5           string
 }
 
 // PickURL 取一个可用的原图 URL（优先 origin，其次 large/medium/thumb）。
@@ -434,15 +438,19 @@ func (c *Client) parseChatJsonItem(obj map[string]any, senderID, selfUid string)
 	if aweType == 2702 {
 		if ru, ok := obj["resource_url"].(map[string]any); ok {
 			if skey, _ := ru["skey"].(string); skey != "" {
+				oid, _ := ru["oid"].(string)
+				md5s, _ := ru["md5"].(string)
 				image = &ImImage{
 					Skey:          skey,
+					Oid:           oid,
+					Md5:           md5s,
+					DataSize:      toInt(ru["data_size"]),
+					CoverWidth:    toInt(obj["cover_width"]),
+					CoverHeight:   toInt(obj["cover_height"]),
 					OriginURLList: strList(ru["origin_url_list"]),
 					LargeURLList:  strList(ru["large_url_list"]),
 					MediumURLList: strList(ru["medium_url_list"]),
 					ThumbURLList:  strList(ru["thumb_url_list"]),
-				}
-				if md5s, ok := ru["md5"].(string); ok {
-					image.Md5 = md5s
 				}
 			}
 		}

@@ -123,6 +123,13 @@ func TestParseImageNoText(t *testing.T) {
 	if p.image.Md5 != "c78e26432cdf5915c2661aaaa9ce4e03" || p.direction != "recv" {
 		t.Fatalf("md5/方向不对: %+v %s", p.image, p.direction)
 	}
+	if p.image.Oid != "tos-cn-o-00061/bf454062d9b449f3a57783cd4f1db9bf" ||
+		p.image.DataSize != 73119 || p.image.CoverWidth != 600 || p.image.CoverHeight != 600 {
+		t.Fatalf("oid/尺寸/大小不对: %+v", p.image)
+	}
+	if len(p.image.LargeURLList) != 1 || len(p.image.ThumbURLList) != 1 {
+		t.Fatalf("各档 url_list 未解全: %+v", p.image)
+	}
 }
 
 // 自己发的消息应判为 sent。

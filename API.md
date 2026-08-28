@@ -250,9 +250,16 @@ curl -s $BASE/health
   "sender_sec_uid": "MS4wLjAB…",
   "text": "在吗",
   "image": {                        // 仅图片消息才有
-    "url": "https://…",
-    "skey": "…",
-    "link": "http://127.0.0.1:9503/img?u=…&k=…"
+    "oid": "tos-cn-o-00061/…",
+    "skey": "…", "md5": "…",
+    "data_size": 73119, "cover_width": 600, "cover_height": 600,
+    "url":  "https://…",                            // 主 url（origin 优先，加密原图）
+    "link": "http://127.0.0.1:9503/img?u=…&k=…",    // 主图解密链接，打开即正常图片
+    "origin_url_list": ["…"], "large_url_list": ["…"],
+    "medium_url_list": ["…"], "thumb_url_list": ["…"],
+    "links": {                                       // 各档拿来即用的解密代理链接
+      "origin": "http://…/img?u=…&k=…", "large": "…", "medium": "…", "thumb": "…"
+    }
   } }
 ```
 
