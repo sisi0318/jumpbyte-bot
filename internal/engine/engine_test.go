@@ -101,6 +101,30 @@ func TestParseImageItem(t *testing.T) {
 	}
 }
 
+// 真实的纯图片消息（无 text 字段）也要能解出，text 占位 [图片]。
+func TestParseImageNoText(t *testing.T) {
+	c := New("", "999", "999")
+	raw := `{"aweType":2702,"check_pics":[],"cover_height":600,"cover_width":600,"from_gallery":1,"md5":"c78e26432cdf5915c2661aaaa9ce4e03","ref_msg_info":{"comment":""},"resource_url":{"data_size":73119,"large_url_list":["https://p26-sign.douyinpic.com/x~tplv-x-get:large.image?a=1"],"md5":"c78e26432cdf5915c2661aaaa9ce4e03","medium_url_list":["https://m/medium"],"oid":"tos-cn-o-00061/bf454062d9b449f3a57783cd4f1db9bf","origin_url_list":["https://p3-sign.douyinpic.com/x~tplv-x-get:.image?a=1"],"skey":"fde318b1d9cee269ceb32ed6545cc0e81c0674649e297438c6737e2a9445c1ef","thumb_url_list":["https://t/thumb"]}}`
+	var obj map[string]any
+	mustJSON(t, raw, &obj)
+	p, ok := c.parseChatJsonItem(obj, "888", "999")
+	if !ok || p.image == nil {
+		t.Fatalf("纯图片消息应解出: ok=%v img=%v", ok, p.image)
+	}
+	if p.text != "[图片]" {
+		t.Fatalf("无文本应占位 [图片]，得 %q", p.text)
+	}
+	if p.image.Skey != "fde318b1d9cee269ceb32ed6545cc0e81c0674649e297438c6737e2a9445c1ef" {
+		t.Fatalf("skey 不对: %s", p.image.Skey)
+	}
+	if !strings.Contains(p.image.PickURL(), "~tplv-x-get:.image") { // 优先 origin
+		t.Fatalf("PickURL 应取 origin: %s", p.image.PickURL())
+	}
+	if p.image.Md5 != "c78e26432cdf5915c2661aaaa9ce4e03" || p.direction != "recv" {
+		t.Fatalf("md5/方向不对: %+v %s", p.image, p.direction)
+	}
+}
+
 // 自己发的消息应判为 sent。
 func TestSelfDirection(t *testing.T) {
 	c := New("", "999", "999")

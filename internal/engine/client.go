@@ -427,25 +427,9 @@ func (c *Client) collectChatFromRawJson(payload []byte, out *[]chatItem, selfUid
 }
 
 func (c *Client) parseChatJsonItem(obj map[string]any, senderID, selfUid string) (parsedItem, bool) {
-	var text string
-	if t, ok := obj["text"].(string); ok && t != "" {
-		text = t
-	} else {
-		d := c.parseMessageDisplay(obj)
-		if d == "" {
-			return parsedItem{}, false
-		}
-		text = d
-	}
-
 	aweType := toInt(obj["aweType"])
-	sid := strings.TrimSpace(senderID)
-	self := strings.TrimSpace(selfUid)
-	if self == "" {
-		self = strings.TrimSpace(c.CkUid)
-	}
-	isSelf := self != "" && sid != "" && sid == self
 
+	// 先抠图片：纯图片消息往往没有 text 字段，必须在"文本判空"之前处理，否则会被丢掉。
 	var image *ImImage
 	if aweType == 2702 {
 		if ru, ok := obj["resource_url"].(map[string]any); ok {
@@ -464,8 +448,25 @@ func (c *Client) parseChatJsonItem(obj map[string]any, senderID, selfUid string)
 		}
 	}
 
+	// 文本：text > 展示文案 > 图片占位
+	text, _ := obj["text"].(string)
+	if text == "" {
+		text = c.parseMessageDisplay(obj)
+	}
+	if text == "" && image != nil {
+		text = "[图片]"
+	}
+	if text == "" {
+		return parsedItem{}, false
+	}
+
+	sid := strings.TrimSpace(senderID)
+	self := strings.TrimSpace(selfUid)
+	if self == "" {
+		self = strings.TrimSpace(c.CkUid)
+	}
 	dir := "recv"
-	if isSelf {
+	if self != "" && sid != "" && sid == self {
 		dir = "sent"
 	}
 	return parsedItem{text: text, aweType: aweType, direction: dir, image: image}, true
