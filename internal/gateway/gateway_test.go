@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -232,6 +233,45 @@ func TestOriWsRawFrame(t *testing.T) {
 	f0 := fields[0].(map[string]any)
 	if f0["f"].(float64) != 1 || f0["t"] != "varint" || f0["v"] != "100" {
 		t.Fatalf("f1 应为 varint 100: %v", f0)
+	}
+}
+
+func TestEmitSelf(t *testing.T) {
+	dial := func(ts *httptest.Server) *websocket.Conn {
+		u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?access_token=tok123"
+		c, _, err := websocket.DefaultDialer.Dial(u, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hello map[string]any
+		_ = c.ReadJSON(&hello)
+		return c
+	}
+	sent := engine.IncomingMessage{Direction: "sent", ConvID: "0:1:1000:1000", Text: "self"}
+
+	// emit_self 开启 → message_self
+	gOn := New(&config.BotConfig{Host: "127.0.0.1", Token: "tok123", EmitSelf: true},
+		&config.Account{ID: "main", UID: "1000", Enabled: true}, &fakeSender{})
+	tsOn := httptest.NewServer(gOn.handler())
+	defer tsOn.Close()
+	cOn := dial(tsOn)
+	defer cOn.Close()
+	gOn.EmitMessage(sent)
+	var ev map[string]any
+	if err := cOn.ReadJSON(&ev); err != nil || ev["type"] != "message_self" || ev["text"] != "self" {
+		t.Fatalf("emit_self=true 应推 message_self: %v %v", ev, err)
+	}
+
+	// emit_self 关闭 → 不推（读超时）
+	gOff, _ := newTestGW() // EmitSelf 默认 false
+	tsOff := httptest.NewServer(gOff.handler())
+	defer tsOff.Close()
+	cOff := dial(tsOff)
+	defer cOff.Close()
+	gOff.EmitMessage(sent)
+	_ = cOff.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := cOff.ReadMessage(); err == nil {
+		t.Fatal("emit_self=false 不该推 message_self")
 	}
 }
 

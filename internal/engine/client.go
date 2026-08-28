@@ -13,8 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // -- 常量（来自 ImClient.ts）------------------------------------------------
@@ -27,8 +25,6 @@ const (
 	akSalt   = "f8a69f1719916z"
 
 	awemeAID               = "1128"
-	awemeSDKVersion        = "5.0.3.0-rc.11-SNAPSHOT"
-	awemeBuildNumber       = "5030"
 	awemeVersionCode       = "280400"
 	awemeVersionName       = "28.4.0"
 	awemeUpdateVersionCode = "28409900"
@@ -83,6 +79,18 @@ type Client struct {
 	Proxy    *WsProxy
 	OnRaw    func([]byte) // 可选：每收到一帧原始 payload 就回调（调试用）
 	seq      int64
+	shortIDs sync.Map // convID(string) -> conv_short_id(uint64)，从收到的消息里学，发送时回填
+}
+
+// resolveShort 发送时若未显式给 short_id，用收包学到的缓存回填。
+func (c *Client) resolveShort(convID string, shortID uint64) uint64 {
+	if shortID != 0 {
+		return shortID
+	}
+	if v, ok := c.shortIDs.Load(convID); ok {
+		return v.(uint64)
+	}
+	return 0
 }
 
 // New 创建客户端。uid 为账号 user_id。
@@ -242,26 +250,28 @@ func (c *Client) handleIncoming(raw []byte, onMessage func(IncomingMessage)) {
 	}
 	self := strings.TrimSpace(c.CkUid)
 	for _, it := range items {
-		if it.direction == "sent" {
-			continue // 自己发的
+		if it.shortID != 0 && it.convID != "" {
+			c.shortIDs.Store(it.convID, it.shortID) // 学会话短 ID，供发送回填
 		}
-		if it.senderID != "" && self != "" && strings.TrimSpace(it.senderID) == self {
-			continue
-		}
+		// 投递全部（recv + sent，带 Direction），由消费侧决定是否要自己发的
 		convID := it.convID
 		if convID == "" && !strings.HasPrefix(it.text, "[系统]") {
 			peer := strings.TrimSpace(it.senderID)
-			if isDigits(self) && isDigits(peer) && self != peer {
-				x, y := self, peer
-				if convLess(y, x) {
-					x, y = y, x
+			if isDigits(self) && isDigits(peer) {
+				if self == peer {
+					convID = "0:1:" + self + ":" + self // 自聊
+				} else {
+					x, y := self, peer
+					if convLess(y, x) {
+						x, y = y, x
+					}
+					convID = "0:1:" + x + ":" + y
 				}
-				convID = "0:1:" + x + ":" + y
 			}
 		}
 		onMessage(IncomingMessage{
 			ConvID: convID, SenderID: it.senderID, SenderMs4: it.senderMs4,
-			Text: it.text, AweType: it.aweType, Image: it.image, Direction: "recv",
+			Text: it.text, AweType: it.aweType, Image: it.image, Direction: it.direction,
 		})
 	}
 }
@@ -502,126 +512,6 @@ func (c *Client) parseMessageDisplay(obj map[string]any) string {
 		return "[系统] " + toStr(tips)
 	}
 	return ""
-}
-
-// -- 组包 + 发送（渠道 1 douyin_main 文本）----------------------------------
-
-type ch1Content struct {
-	Type            int    `json:"type"`
-	InstructionType int    `json:"instruction_type"`
-	ItemTypeLocal   int    `json:"item_type_local"`
-	Text            string `json:"text"`
-	CreatedAt       int    `json:"createdAt"`
-	IsCard          bool   `json:"is_card"`
-	MsgHint         string `json:"msgHint"`
-	AweType         int    `json:"aweType"`
-}
-
-// buildSendMessage 组渠道 1 文本消息帧，返回 (payload, clientMsgId)。
-func (c *Client) buildSendMessage(conversationID string, conversationShortID uint64, text string) ([]byte, string) {
-	seqID := c.nextSeq()
-	ms := time.Now().UnixMilli()
-	clientMsgID := uuid.NewString()
-
-	content := ch1Content{Type: 0, InstructionType: 0, ItemTypeLocal: -1, Text: text, CreatedAt: 0, IsCard: false, MsgHint: "", AweType: 700}
-	contentJSON := jsonNoEscape(content)
-
-	ext := [][2]string{
-		{"s:ticket_mode", "0"},
-		{"im_client_send_msg_time", strconv.FormatInt(ms-500, 10)},
-		{"a:plv", "1"},
-		{"a:access", "douyin_main"},
-		{"s:biz_aid", awemeAID},
-		{"chat_scene", "normal"},
-		{"a:msg_scene", "1"},
-		{"im_sdk_client_send_msg_time", strconv.FormatInt(ms-375, 10)},
-		{"a:relation_type", "0:0"},
-		{"a:smp_token_fetch", "11"},
-		{"a:ntp_ready", "2"},
-		{"s:sync_2_newdx", "1"},
-		{"old_client_message_id", strconv.FormatInt(ms, 10)},
-		{"s:mode", "0"},
-		{"a:enter_method", "click_message"},
-		{"a:biz", "douyin"},
-		{"s:is_stranger", "false"},
-		{"source_aid", awemeAID},
-		{"s:saas_sdk", "false"},
-		{"a:sync2dx", "1"},
-		{"s:refer", "3"},
-	}
-	ext12 := [][2]string{
-		{"s:reverse_creator_im_ex", "0"},
-		{"a:from_role_ids", ""},
-		{"s:im_creator_chat_opt_exp", "0"},
-		{"s:send_ignore_ticket", "true"},
-		{"s:im_chat_priv_opt_exp", "1"},
-		{"a:to_role_ids", "[]"},
-	}
-
-	var field100 []byte
-	field100 = append(field100, encodeLenDelimS(1, conversationID)...)
-	field100 = append(field100, encodeFieldVarint(2, 1)...)
-	field100 = append(field100, encodeFieldVarint(3, conversationShortID)...)
-	field100 = append(field100, encodeLenDelimS(4, contentJSON)...)
-	for _, kv := range ext {
-		field100 = append(field100, encodeKvPair(5, kv[0], kv[1])...)
-	}
-	field100 = append(field100, encodeFieldVarint(6, 7)...)
-	field100 = append(field100, encodeLenDelimS(8, clientMsgID)...)
-	for _, kv := range ext12 {
-		field100 = append(field100, encodeKvPair(12, kv[0], kv[1])...)
-	}
-
-	msgWrapper := encodeLenDelim(100, field100)
-	inner := c.buildAndroidCmd100Inner(msgWrapper, seqID, "douyin", "douyin_main")
-	payload := c.wrapAndroidCmd100Outer(inner, seqID, ms)
-	return payload, clientMsgID
-}
-
-func (c *Client) buildAndroidCmd100Inner(msgWrapper []byte, seqID int, biz, access string) []byte {
-	deviceID := c.CkUid
-	parts := concat(
-		encodeFieldVarint(1, 100),
-		encodeFieldVarint(2, uint64(seqID)),
-		encodeLenDelimS(3, awemeSDKVersion),
-		encodeFieldVarint(5, 1),
-		encodeFieldVarint(6, 0),
-		encodeLenDelimS(7, awemeBuildNumber),
-		encodeLenDelim(8, msgWrapper),
-		encodeLenDelimS(9, deviceID),
-		encodeLenDelimS(10, awemeChannel),
-		encodeLenDelimS(11, "android"),
-		encodeLenDelimS(12, awemeDeviceType),
-		encodeLenDelimS(13, awemeOSVersion),
-		encodeLenDelimS(14, awemeVersionCode),
-	)
-	for _, kv := range [][2]string{
-		{"app_name", awemeAppName}, {"iid", deviceID}, {"version_code", awemeVersionCode},
-		{"net_mcc_mnc", "46000"}, {"aid", awemeAID}, {"flow-tag", "new"}, {"user-agent", awemeUA},
-	} {
-		parts = append(parts, encodeKvPair(15, kv[0], kv[1])...)
-	}
-	parts = append(parts, encodeFieldVarint(18, 0)...)
-	parts = append(parts, encodeLenDelimS(21, biz)...)
-	parts = append(parts, encodeLenDelimS(22, access)...)
-	return parts
-}
-
-func (c *Client) wrapAndroidCmd100Outer(inner []byte, seqID int, timestampMs int64) []byte {
-	return concat(
-		encodeFieldVarint(1, uint64(seqID)),
-		encodeFieldVarint(2, uint64(timestampMs)),
-		encodeFieldVarint(3, 5),
-		encodeFieldVarint(4, 1),
-		encodeKvPair(5, "msg_type", "cmd100"),
-		encodeKvPair(5, "seq_id", strconv.Itoa(seqID)),
-		encodeKvPair(5, "cmd", "100"),
-		encodeKvPair(5, "is-retry", "0"),
-		encodeKvPair(5, "flow-tag", "new"),
-		encodeLenDelimS(6, "pb"),
-		encodeLenDelimS(7, "pb"),
-		encodeLenDelim(8, inner),
-	)
 }
 
 // SendResult 发送返回（对应网关 API 的 data）。

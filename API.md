@@ -252,7 +252,7 @@ curl -s $BASE/health
   "image": {                        // 仅图片消息才有
     "url": "https://…",
     "skey": "…",
-    "link": "http://127.0.0.1:9520/img?u=…&k=…"
+    "link": "http://127.0.0.1:9503/img?u=…&k=…"
   } }
 ```
 
@@ -313,4 +313,6 @@ done
 
 ---
 
-未实现：`send_card` / `send_action_card`、点赞、`message_self`。
+`message_self`（自己发的消息）默认不推，在 `bot.json` 开 `emit_self` 后以 `message_self` 事件下推。
+
+未实现：`send_card` / `send_action_card`、点赞。

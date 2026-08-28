@@ -1,68 +1,77 @@
 package media
 
 import (
-	"fmt"
-	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 )
 
+// 图片解密代理：不自己监听端口，挂到网关的 HTTP mux 上共用同一端口。
+//
+//	GET /img?u=<encodedUrl>&k=<skey> → 下载 + AES-256-GCM 解密 → 正常图片
+
 var (
-	imgPort int
-	imgMu   sync.Mutex
+	proxyBase string // 网关地址，如 http://127.0.0.1:9503
+	proxyMu   sync.RWMutex
 )
 
-// StartImageServer 启动本地图片代理，返回端口（0=启动失败）。已启动则返回现有端口。
-//
-//	GET http://127.0.0.1:<port>/img?u=<encodedUrl>&k=<skey> → 下载+解密 → 正常图片
-func StartImageServer(preferPort int) int {
-	imgMu.Lock()
-	defer imgMu.Unlock()
-	if imgPort > 0 {
-		return imgPort
+// 只允许解密图床域名，堵住"取任意 URL"的 SSRF。
+var allowedImageHosts = []string{
+	"douyinpic.com", "douyin.com", "iesdouyin.com", "amemv.com",
+	"byteimg.com", "ibyteimg.com", "bytedance.com", "pstatp.com",
+}
+
+func allowedImageHost(rawURL string) bool {
+	pu, err := url.Parse(rawURL)
+	if err != nil || (pu.Scheme != "https" && pu.Scheme != "http") {
+		return false
 	}
-	if preferPort <= 0 {
-		preferPort = 9520
+	host := pu.Hostname()
+	for _, s := range allowedImageHosts {
+		if host == s || strings.HasSuffix(host, "."+s) {
+			return true
+		}
 	}
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", preferPort))
+	return false
+}
+
+// SetProxyBase 网关启动时告知自己的地址，图片链接据此拼。
+func SetProxyBase(base string) {
+	proxyMu.Lock()
+	proxyBase = strings.TrimRight(base, "/")
+	proxyMu.Unlock()
+}
+
+// ImageHandler /img 处理器，挂到网关 mux 上。免鉴权（<img> 带不了 header）+ 域名白名单兜底。
+func ImageHandler(w http.ResponseWriter, r *http.Request) {
+	u := r.URL.Query().Get("u")
+	k := r.URL.Query().Get("k")
+	if u == "" || k == "" {
+		http.Error(w, "need u & k", http.StatusBadRequest)
+		return
+	}
+	if !allowedImageHost(u) {
+		http.Error(w, "host not allowed", http.StatusForbidden)
+		return
+	}
+	data, err := FetchAndDecrypt(u, k)
 	if err != nil {
-		return 0
+		http.Error(w, "err: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	imgPort = preferPort
-	mux := http.NewServeMux()
-	mux.HandleFunc("/img", func(w http.ResponseWriter, r *http.Request) {
-		u := r.URL.Query().Get("u")
-		k := r.URL.Query().Get("k")
-		if u == "" || k == "" {
-			http.Error(w, "need u & k", http.StatusBadRequest)
-			return
-		}
-		data, err := FetchAndDecrypt(u, k)
-		if err != nil {
-			http.Error(w, "err: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", sniffMime(data))
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-		_, _ = w.Write(data)
-	})
-	go func() { _ = http.Serve(ln, mux) }()
-	return imgPort
+	w.Header().Set("Content-Type", sniffMime(data))
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(data)
 }
 
-// ImageServerPort 当前端口（0=未启动）。
-func ImageServerPort() int {
-	imgMu.Lock()
-	defer imgMu.Unlock()
-	return imgPort
-}
-
-// ImageLink 拼一个本地解密代理链接；服务未起时返回原始 url。
+// ImageLink 拼本地解密代理链接；未设 base（网关没起）时返回原始 url。
 func ImageLink(rawURL, skey string) string {
-	p := ImageServerPort()
-	if p <= 0 {
+	proxyMu.RLock()
+	base := proxyBase
+	proxyMu.RUnlock()
+	if base == "" {
 		return rawURL
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d/img?u=%s&k=%s", p, url.QueryEscape(rawURL), url.QueryEscape(skey))
+	return base + "/img?u=" + url.QueryEscape(rawURL) + "&k=" + url.QueryEscape(skey)
 }

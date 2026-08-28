@@ -15,6 +15,8 @@ import (
 	"gobot/internal/store"
 )
 
+var webHTTP = &http.Client{Timeout: 15 * time.Second}
+
 const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) douyinim/1.1.31 Chrome/130.0.6723.58 Electron/33.4.11 Safari/537.36"
 
 // User 解析出的用户。
@@ -58,7 +60,7 @@ func FetchUserInfo(cookie string, secUids []string, deviceID string) map[string]
 	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 	req.Header.Set("Referer", "https://imdesktop.douyin.com")
 	req.Header.Set("Origin", "https://imdesktop.douyin.com")
-	res, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	res, err := webHTTP.Do(req)
 	if err != nil {
 		return out
 	}

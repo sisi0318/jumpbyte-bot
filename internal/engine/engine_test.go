@@ -44,23 +44,18 @@ func TestVarintRoundTrip(t *testing.T) {
 	}
 }
 
-// 发送帧结构：外层 field1=seq(varint), field8=inner(message)，inner field1=100。
-func TestBuildSendMessageStructure(t *testing.T) {
+// 发送帧结构 + 收包往返：buildIMAPIBody 造帧（外层 f1=cmd=100），collectChat 能抠回文本。
+func TestBuildAndCollectRoundTrip(t *testing.T) {
 	c := New("sid=abc", "3249781169", "3249781169")
-	payload, cmid := c.buildSendMessage("0:1:111:222", 0, "你好&<world>")
+	content := jsonNoEscape(imapiTextContent{AweType: 700, Type: 0, RichTextInfos: []any{}, Text: "你好&<world>"})
+	payload, cmid := c.buildIMAPIBody("0:1:111:222", 0, content)
 	if len(cmid) != 36 {
 		t.Fatalf("clientMsgId 应为 uuid: %q", cmid)
 	}
 	top := decodeTop(payload)
-	f1, ok := searchPath(top, []int{1})
-	if !ok || f1 != 1 { // 首个消息 seq=1
-		t.Fatalf("外层 field1(seq) 期望 1，得 %d ok=%v", f1, ok)
+	if v, ok := searchPath(top, []int{1}); !ok || v != 100 { // imapi 外层 f1=cmd=100
+		t.Fatalf("外层 field1(cmd) 期望 100，得 %d ok=%v", v, ok)
 	}
-	// field3=5, field4=1
-	if v, ok := searchPath(top, []int{3}); !ok || v != 5 {
-		t.Fatalf("外层 field3 期望 5，得 %d", v)
-	}
-	// 深入到内容 JSON：collectChat 应能抠出文本（含未转义的 & < >）
 	var items []chatItem
 	c.collectChat(top, &items, "", "", "", "")
 	found := false
@@ -76,8 +71,7 @@ func TestBuildSendMessageStructure(t *testing.T) {
 
 // JSON 内容编码：不转义 & < > /，中文原样（对应 UNESCAPED_UNICODE|UNESCAPED_SLASHES）。
 func TestJSONNoEscape(t *testing.T) {
-	s := jsonNoEscape(ch1Content{Text: "a&b<c>d/e 中文", AweType: 700, ItemTypeLocal: -1})
-	// 既不该有 \uXXXX（< > & 中文都不转义），也不该有 \/（斜杠不转义）
+	s := jsonNoEscape(imapiTextContent{AweType: 700, Type: 0, RichTextInfos: []any{}, Text: "a&b<c>d/e 中文"})
 	if strings.Contains(s, `\u`) {
 		t.Fatalf("不该出现 \\u 转义: %s", s)
 	}
@@ -86,10 +80,6 @@ func TestJSONNoEscape(t *testing.T) {
 	}
 	if !strings.Contains(s, `"text":"a&b<c>d/e 中文"`) {
 		t.Fatalf("text 字段应原样保留 < > & / 中文: %s", s)
-	}
-	// 字段顺序应固定（结构体顺序）
-	if !strings.HasPrefix(s, `{"type":0,"instruction_type":0,"item_type_local":-1,`) {
-		t.Fatalf("字段顺序不对: %s", s)
 	}
 }
 

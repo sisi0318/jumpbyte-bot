@@ -118,7 +118,8 @@ internal/
 
 ## 状态
 
-单账号。`send_card` / `send_action_card` / 点赞 / `message_self` 未实现。
+单账号。`send_card` / `send_action_card` / 点赞未实现。
+`message_self`（自己发的消息）需在 `bot.json` 里开 `emit_self`。
 
 ## ⚡ 超级无敌宇宙雷霆免责声明 ⚡
 

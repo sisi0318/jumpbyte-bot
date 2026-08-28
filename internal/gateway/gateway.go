@@ -40,15 +40,68 @@ type accountStatus struct {
 	OnlineSince int64  `json:"online_since"`
 }
 
+// wsClient 每个 WS 连接一个带缓冲的发送队列 + 独立写 goroutine。
+// 慢/半死的消费者只会撑满自己的队列（丢最旧的），绝不阻塞广播方（收包线程）。
 type wsClient struct {
 	conn *websocket.Conn
-	mu   sync.Mutex // gorilla 不允许并发写
+	out  chan []byte
+	done chan struct{}
+	once sync.Once
 }
 
-func (c *wsClient) send(b []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn.WriteMessage(websocket.TextMessage, b)
+func newWsClient(conn *websocket.Conn, queueLimit int) *wsClient {
+	if queueLimit <= 0 {
+		queueLimit = 1000
+	}
+	c := &wsClient{conn: conn, out: make(chan []byte, queueLimit), done: make(chan struct{})}
+	go c.writeLoop()
+	return c
+}
+
+func (c *wsClient) writeLoop() {
+	ping := time.NewTicker(30 * time.Second)
+	defer ping.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case b := <-c.out:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if c.conn.WriteMessage(websocket.TextMessage, b) != nil {
+				c.close()
+				return
+			}
+		case <-ping.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)) != nil {
+				c.close()
+				return
+			}
+		}
+	}
+}
+
+// push 非阻塞入队；满了先丢最旧再塞，还满就放弃这条（不拖垮广播方）。
+func (c *wsClient) push(b []byte) {
+	select {
+	case c.out <- b:
+	default:
+		select {
+		case <-c.out:
+		default:
+		}
+		select {
+		case c.out <- b:
+		default:
+		}
+	}
+}
+
+func (c *wsClient) close() {
+	c.once.Do(func() {
+		close(c.done)
+		_ = c.conn.Close()
+	})
 }
 
 // Sender 发送能力（*engine.Client 实现；便于测试替身）。
@@ -68,6 +121,7 @@ type Gateway struct {
 	acc *config.Account
 	eng Sender
 	up  websocket.Upgrader
+	srv *http.Server
 
 	mu      sync.Mutex
 	subs    map[*wsClient]struct{} // /ws 事件订阅者
@@ -96,6 +150,7 @@ func (g *Gateway) handler() http.Handler {
 	mux.HandleFunc("/ws", g.handleWs)
 	mux.HandleFunc("/oriws", g.handleOriWs)
 	mux.HandleFunc("/health", g.handleHealth)
+	mux.HandleFunc("/img", media.ImageHandler) // 图片解密代理，共用本端口
 	mux.HandleFunc("/api/", g.handleAPI)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, errMsg(404, "unknown path"))
@@ -109,8 +164,34 @@ func (g *Gateway) Start() error {
 	if err != nil {
 		return err
 	}
-	go func() { _ = http.Serve(ln, g.handler()) }()
+	media.SetProxyBase("http://" + g.linkAddr()) // 图片链接指向本端口
+	g.srv = &http.Server{Handler: g.handler()}
+	go func() { _ = g.srv.Serve(ln) }()
 	return nil
+}
+
+// Stop 关闭 HTTP 服务并断开所有 WS 连接（优雅退出用）。
+func (g *Gateway) Stop() {
+	if g.srv != nil {
+		_ = g.srv.Close()
+	}
+	g.mu.Lock()
+	for c := range g.subs {
+		c.close()
+	}
+	for c := range g.orisubs {
+		c.close()
+	}
+	g.mu.Unlock()
+}
+
+// linkAddr 供图片链接用的地址：host 是 0.0.0.0/空时回落到 127.0.0.1。
+func (g *Gateway) linkAddr() string {
+	h := g.cfg.Host
+	if h == "" || h == "0.0.0.0" || h == "::" {
+		h = "127.0.0.1"
+	}
+	return net.JoinHostPort(h, strconv.Itoa(g.cfg.Port))
 }
 
 // Addr host:port，打印用。
@@ -144,8 +225,19 @@ func (g *Gateway) list() []accountStatus {
 
 // -- 事件下推 ---------------------------------------------------------------
 
-// EmitMessage 推一条收到的私信（含图片时带 image{url,skey,link}）。
+// EmitMessage 推一条消息。别人发来的→message；自己发的→message_self（仅 emit_self 开启时）。
 func (g *Gateway) EmitMessage(m engine.IncomingMessage) {
+	if m.Direction == "sent" {
+		if !g.cfg.EmitSelf {
+			return
+		}
+		g.broadcast(map[string]any{
+			"type": "message_self", "id": randID(), "time": time.Now().Unix(),
+			"account": g.acc.ID, "self_uid": g.acc.UID,
+			"conv_id": m.ConvID, "text": m.Text,
+		})
+		return
+	}
 	ev := map[string]any{
 		"type": "message", "id": randID(), "time": time.Now().Unix(),
 		"account": g.acc.ID, "self_uid": g.acc.UID,
@@ -184,7 +276,7 @@ func (g *Gateway) broadcastTo(subs map[*wsClient]struct{}, ev any) {
 	}
 	g.mu.Unlock()
 	for _, c := range clients {
-		_ = c.send(b)
+		c.push(b)
 	}
 }
 
@@ -217,20 +309,20 @@ func (g *Gateway) handleWs(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	client := &wsClient{conn: conn}
+	client := newWsClient(conn, g.cfg.QueueLimit)
 	g.mu.Lock()
 	g.subs[client] = struct{}{}
 	g.mu.Unlock()
 
 	hello, _ := json.Marshal(map[string]any{"type": "hello", "protocol": protocolVersion, "accounts": g.list()})
-	_ = client.send(hello)
+	client.push(hello)
 
 	go func() {
 		defer func() {
 			g.mu.Lock()
 			delete(g.subs, client)
 			g.mu.Unlock()
-			_ = conn.Close()
+			client.close()
 		}()
 		for {
 			_, data, err := conn.ReadMessage()
@@ -238,7 +330,7 @@ func (g *Gateway) handleWs(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if strings.Contains(string(data), "ping") {
-				_ = client.send([]byte(`{"type":"pong"}`))
+				client.push([]byte(`{"type":"pong"}`))
 			}
 		}
 	}()
@@ -255,18 +347,18 @@ func (g *Gateway) handleOriWs(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	client := &wsClient{conn: conn}
+	client := newWsClient(conn, g.cfg.QueueLimit)
 	g.mu.Lock()
 	g.orisubs[client] = struct{}{}
 	g.mu.Unlock()
-	_ = client.send([]byte(`{"type":"hello","channel":"raw"}`))
+	client.push([]byte(`{"type":"hello","channel":"raw"}`))
 
 	go func() {
 		defer func() {
 			g.mu.Lock()
 			delete(g.orisubs, client)
 			g.mu.Unlock()
-			_ = conn.Close()
+			client.close()
 		}()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {

@@ -34,12 +34,30 @@ func TestDecryptImageRoundTrip(t *testing.T) {
 }
 
 func TestImageLink(t *testing.T) {
-	p := StartImageServer(9531)
-	if p == 0 {
-		t.Skip("端口占用，跳过")
+	SetProxyBase("")
+	if got := ImageLink("https://p.douyinpic.com/x.image", "k"); got != "https://p.douyinpic.com/x.image" {
+		t.Fatalf("无 base 应返回原始 url: %s", got)
 	}
-	link := ImageLink("https://p.douyinpic.com/x.image?sig=1", "2b08ccbd")
-	if link == "" || link[:4] != "http" {
-		t.Fatalf("bad link: %s", link)
+	SetProxyBase("http://127.0.0.1:9503/")
+	got := ImageLink("https://p.douyinpic.com/x.image?sig=1", "2b08ccbd")
+	want := "http://127.0.0.1:9503/img?u=" + "https%3A%2F%2Fp.douyinpic.com%2Fx.image%3Fsig%3D1" + "&k=2b08ccbd"
+	if got != want {
+		t.Fatalf("link 不对:\n got=%s\nwant=%s", got, want)
+	}
+	SetProxyBase("")
+}
+
+func TestAllowedImageHost(t *testing.T) {
+	ok := []string{"https://p11-sign.douyinpic.com/x", "https://api.amemv.com/y", "https://lf3-social.iesdouyin.com/z"}
+	bad := []string{"http://169.254.169.254/latest/meta-data/", "https://evil.com/x", "file:///etc/passwd", "https://douyinpic.com.evil.com/x"}
+	for _, u := range ok {
+		if !allowedImageHost(u) {
+			t.Fatalf("应允许: %s", u)
+		}
+	}
+	for _, u := range bad {
+		if allowedImageHost(u) {
+			t.Fatalf("应拒绝: %s", u)
+		}
 	}
 }

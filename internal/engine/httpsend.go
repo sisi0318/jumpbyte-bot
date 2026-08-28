@@ -27,6 +27,12 @@ const (
 	pcUA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) douyinim/1.1.33 Chrome/136.0.7103.59 Electron/36.3.2 Safari/537.36"
 )
 
+// 复用 http.Client 以复用连接（TLS 握手）。imHTTP 用于短请求，uploadHTTP 用于上传/分片。
+var (
+	imHTTP     = &http.Client{Timeout: 30 * time.Second}
+	uploadHTTP = &http.Client{Timeout: 3 * time.Minute}
+)
+
 // imapiTextContent 文本 content JSON（字段顺序照 HAR：aweType,type,richTextInfos,text）。
 type imapiTextContent struct {
 	AweType       int    `json:"aweType"`
@@ -132,7 +138,7 @@ func (c *Client) postIMAPIRaw(url string, body []byte) ([]byte, error) {
 	req.Header.Set("User-Agent", pcUA)
 	req.Header.Set("Cookie", c.Cookie)
 	req.Header.Set("Referer", "https://imdesktop.douyin.com")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := imHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +152,7 @@ func (c *Client) postIMAPIRaw(url string, body []byte) ([]byte, error) {
 
 // sendIMAPI 发消息(cmd100)并解析回执（f3=status,0=OK；f6→f100→f1=server_msg_id）。
 func (c *Client) sendIMAPI(convID string, shortID uint64, contentJSON string) (SendResult, error) {
+	shortID = c.resolveShort(convID, shortID)
 	res := SendResult{ConvID: convID, SelfUID: c.CkUid, ConvShortID: u64str(shortID)}
 	if strings.TrimSpace(c.CkUid) == "" {
 		return res, fmt.Errorf("未初始化：缺少 user_id")

@@ -13,6 +13,7 @@ func (c *Client) Recall(convID string, shortID, serverMsgID uint64) error {
 	if strings.TrimSpace(c.CkUid) == "" {
 		return fmt.Errorf("未初始化：缺少 user_id")
 	}
+	shortID = c.resolveShort(convID, shortID)
 	f702 := concat(
 		encodeLenDelimS(1, convID),
 		encodeFieldVarint(2, shortID),

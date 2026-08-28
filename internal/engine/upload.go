@@ -95,7 +95,7 @@ func (c *Client) getUploadConfig() (stsCreds, error) {
 	req.Header.Set("User-Agent", pcUA)
 	req.Header.Set("Cookie", c.Cookie)
 	req.Header.Set("Referer", "https://www.douyin.com/")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := imHTTP.Do(req)
 	if err != nil {
 		return cr, err
 	}
@@ -127,7 +127,7 @@ func (c *Client) applyUpload(cr stsCreds, space, fileType string, size int) (sto
 		"FileSize": strconv.Itoa(size), "s": randLower(11),
 	}
 	req := vodSignedRequest("GET", query, nil, cr)
-	resp, e := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, e := imHTTP.Do(req)
 	if e != nil {
 		return "", "", "", "", e
 	}
@@ -175,7 +175,7 @@ func (c *Client) tosPut(host, storeURI, auth, crc string, data []byte) error {
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Storage-U", c.CkUid)
 	req.Header.Set("User-Agent", pcUA)
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	resp, err := uploadHTTP.Do(req)
 	if err != nil {
 		return err
 	}
@@ -197,7 +197,7 @@ func (c *Client) commitUpload(cr stsCreds, sessionKey string) (oid, skey, md5s s
 	body, _ := json.Marshal(map[string]string{"SessionKey": sessionKey})
 	req := vodSignedRequest("POST", query, body, cr)
 	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
-	resp, e := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, e := imHTTP.Do(req)
 	if e != nil {
 		return "", "", "", e
 	}

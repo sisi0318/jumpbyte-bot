@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // 发视频：封面走图片上传(UploadImage)拿 poster，视频走 TOS 分片上传(init→transfer→finish→commit)拿 video，
@@ -114,7 +113,7 @@ func (c *Client) chunkInit(host, storeURI, auth string) (string, error) {
 	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 	req.Header.Set("X-Storage-U", c.CkUid)
 	req.Header.Set("User-Agent", pcUA)
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := imHTTP.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -142,7 +141,7 @@ func (c *Client) chunkTransfer(host, storeURI, auth, uploadID string, partNum in
 	req.Header.Set("Content-Disposition", `attachment; filename="undefined"`)
 	req.Header.Set("X-Storage-U", c.CkUid)
 	req.Header.Set("User-Agent", pcUA)
-	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
+	resp, err := uploadHTTP.Do(req)
 	if err != nil {
 		return err
 	}
@@ -162,7 +161,7 @@ func (c *Client) chunkFinish(host, storeURI, auth, uploadID, partList string) er
 	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
 	req.Header.Set("X-Storage-U", c.CkUid)
 	req.Header.Set("User-Agent", pcUA)
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := imHTTP.Do(req)
 	if err != nil {
 		return err
 	}

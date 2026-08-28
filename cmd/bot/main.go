@@ -15,8 +15,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"gobot/internal/abogus"
@@ -185,8 +187,6 @@ func runLogin() {
 }
 
 func runCli() {
-	media.StartImageServer(9520)
-
 	acc, err := config.LoadAccount()
 	if err != nil {
 		fmt.Println("[bot] 未找到 cookie.json，先扫码登录...")
@@ -210,9 +210,6 @@ func runCli() {
 			fmt.Println("[bot] cookie 探测异常（" + p.Reason + "），仍尝试启动")
 		}
 	}
-	if p := media.ImageServerPort(); p > 0 {
-		fmt.Printf("[bot] 图片代理 http://127.0.0.1:%d/img?u=<加密url>&k=<skey>\n", p)
-	}
 	eng := engine.New(acc.Cookie, acc.UID, acc.DeviceID)
 
 	// 网关：HTTP 发消息 + WS 收事件（像 QQ bot）。token 在 bot.json，首次自动生成。
@@ -228,6 +225,7 @@ func runCli() {
 			fmt.Printf("[gateway]   收事件  ws://%s/ws?access_token=%s\n", gw.Addr(), bcfg.Token)
 			fmt.Printf("[gateway]   原始帧  ws://%s/oriws?access_token=%s\n", gw.Addr(), bcfg.Token)
 			fmt.Printf("[gateway]   发消息  POST http://%s/api/send_text  (Authorization: Bearer <令牌>)\n", gw.Addr())
+			fmt.Printf("[gateway]   图片    GET  http://%s/img?u=<加密url>&k=<skey>\n", gw.Addr())
 			fmt.Printf("[gateway]   存活    GET  http://%s/health\n", gw.Addr())
 		}
 	}
@@ -235,8 +233,40 @@ func runCli() {
 	fmt.Printf("[cli] 账号 %s (uid=%s) 就绪，连接 IM…\n", acc.Name, acc.UID)
 	fmt.Println("[cli] 也可终端直接发：@<conv_id> <文本> 回车；Ctrl-C 退出。")
 
+	// 打印 worker：昵称解析（可能阻塞网络）+ 打印，独立 goroutine，绝不挡收包。
+	printCh := make(chan engine.IncomingMessage, 256)
+	go func() {
+		for m := range printCh {
+			onIncoming(acc, m)
+		}
+	}()
+	deliver := func(m engine.IncomingMessage) {
+		if gw != nil {
+			gw.EmitMessage(m) // 非阻塞（网关内部每连接有队列）
+		}
+		if m.Direction != "recv" {
+			return // 自己发的不打印，避免回声
+		}
+		select {
+		case printCh <- m:
+		default: // 打印积压就丢，别挡收包
+		}
+	}
+
+	// 优雅退出：Ctrl-C / SIGTERM → 关网关（断开 WS）后退出
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		fmt.Println("\n[bot] 收到退出信号，关闭…")
+		if gw != nil {
+			gw.Stop()
+		}
+		os.Exit(0)
+	}()
+
 	go stdinSender(eng)
-	runEngineLoop(eng, acc, gw)
+	runEngineLoop(eng, acc, gw, deliver)
 }
 
 // onIncoming 打印一条收到的消息（图片透出本地代理链接，昵称走缓存解析）。
@@ -256,40 +286,73 @@ func onIncoming(acc *config.Account, m engine.IncomingMessage) {
 	}
 }
 
-// runEngineLoop 连接 → 收包 → 断线自动重连；同时更新网关状态、下推事件。
-func runEngineLoop(eng *engine.Client, acc *config.Account, gw *gateway.Gateway) {
-	for {
+// runEngineLoop 连接 → 收包 → 断线自动重连（带指数退避 + cookie 失效自愈）。
+func runEngineLoop(eng *engine.Client, acc *config.Account, gw *gateway.Gateway, deliver func(engine.IncomingMessage)) {
+	const maxBackoff = 60 * time.Second
+	backoff := 2 * time.Second
+	setState := func(s, m string) {
 		if gw != nil {
-			gw.SetState("connecting", "connecting")
+			gw.SetState(s, m)
 		}
+	}
+	emit := func(fn func()) {
+		if gw != nil {
+			fn()
+		}
+	}
+	for {
+		// 每轮先确认 cookie 还有效，失效就重新登录（否则会无限空转重连）
+		if p := login.ProbeCookie(acc.Cookie, acc.DeviceID); p.Expired {
+			fmt.Println("[engine] cookie 失效，重新登录…")
+			setState("invalid", "cookie 失效")
+			emit(func() { gw.EmitDisconnect("INVALID") })
+			if !relogin(eng, acc) {
+				time.Sleep(backoff)
+				backoff = capDur(backoff*2, maxBackoff)
+				continue
+			}
+			backoff = 2 * time.Second
+		}
+
+		setState("connecting", "connecting")
 		conn, err := eng.Connect()
 		if err != nil {
-			fmt.Println("[engine] 连接失败：" + err.Error() + "，3s 后重试")
-			if gw != nil {
-				gw.SetState("offline", "NETWORK")
-				gw.EmitDisconnect("NETWORK")
-			}
-			time.Sleep(3 * time.Second)
+			fmt.Printf("[engine] 连接失败：%s，%v 后重试\n", err.Error(), backoff)
+			setState("offline", "NETWORK")
+			emit(func() { gw.EmitDisconnect("NETWORK") })
+			time.Sleep(backoff)
+			backoff = capDur(backoff*2, maxBackoff)
 			continue
 		}
-		fmt.Println("[engine] 已连接 frontier-aweme，开始收消息")
-		if gw != nil {
-			gw.SetOnline()
-			gw.EmitConnect("online")
-		}
-		reason := eng.RunSession(conn, func(m engine.IncomingMessage) {
-			onIncoming(acc, m)
-			if gw != nil {
-				gw.EmitMessage(m)
-			}
-		}, nil)
-		fmt.Printf("[engine] 连接断开(%s)，2s 后重连\n", reason)
-		if gw != nil {
-			gw.SetState("offline", reason)
-			gw.EmitDisconnect(reason)
-		}
+		backoff = 2 * time.Second // 连上就重置退避
+		fmt.Println("[engine] 已连接，开始收消息")
+		emit(func() { gw.SetOnline(); gw.EmitConnect("online") })
+
+		reason := eng.RunSession(conn, deliver, nil)
+		fmt.Printf("[engine] 连接断开(%s)，稍后重连\n", reason)
+		setState("offline", reason)
+		emit(func() { gw.EmitDisconnect(reason) })
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// relogin cookie 失效时重新扫码登录，原地更新 acc + eng（网关持有 acc 指针，同步生效）。
+func relogin(eng *engine.Client, acc *config.Account) bool {
+	na, err := loginAndSave(acc.DeviceID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[engine] 重新登录失败："+err.Error())
+		return false
+	}
+	*acc = *na
+	eng.Cookie, eng.CkUid, eng.DeviceID = na.Cookie, na.UID, na.DeviceID
+	return true
+}
+
+func capDur(d, max time.Duration) time.Duration {
+	if d > max {
+		return max
+	}
+	return d
 }
 
 // stdinSender 从标准输入读  @<conv_id> <文本>  并发送。
