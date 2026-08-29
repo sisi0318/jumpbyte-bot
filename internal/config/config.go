@@ -16,6 +16,7 @@ type Account struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Cookie   string `json:"cookie"`
+	Phone    string `json:"phone"` // 填了且 cookie 为空/失效时，改用短信验证码登录
 	UID      string `json:"uid"`
 	DeviceID string `json:"device_id"`
 	Proxy    string `json:"proxy"`
@@ -45,9 +46,9 @@ func LoadAccount() (*Account, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 1) 单层对象
+	// 1) 单层对象（cookie 或 phone 至少有一个：phone-only 表示走短信登录）
 	var obj Account
-	if json.Unmarshal(data, &obj) == nil && obj.Cookie != "" {
+	if json.Unmarshal(data, &obj) == nil && (obj.Cookie != "" || obj.Phone != "") {
 		obj.Enabled = enabledDefault(data)
 		normalize(&obj)
 		return &obj, nil
@@ -60,8 +61,8 @@ func LoadAccount() (*Account, error) {
 		}
 		a := arr[0]
 		normalize(&a)
-		if a.Cookie == "" {
-			return nil, errors.New("cookie.json 里没有 cookie")
+		if a.Cookie == "" && a.Phone == "" {
+			return nil, errors.New("cookie.json 里既没有 cookie 也没有 phone")
 		}
 		return &a, nil
 	}

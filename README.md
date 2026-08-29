@@ -2,7 +2,7 @@
 
 ## 功能
 
-- 扫码登录（含短信二次验证），cookie 失效自动重新登录
+- 登录：扫码（含短信二次验证）或手机号+短信验证码；cookie 失效自动重新登录
 - 收私信：文本、图片（自动解密）、视频（CENC 自动解密，`play_url` 拿来即播）
 - 发私信：文本、图片、视频、表情、引用回复
 - 撤回消息
@@ -18,14 +18,18 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o dist/jumpbyte-bot ./cmd/bot
 ## 命令
 
 ```
-jumpbyte-bot              探测 cookie（失效自动扫码登录）→ 连接 IM → 启动网关
-jumpbyte-bot login        扫码登录，写 cookie.json
+jumpbyte-bot              探测 cookie（失效自动重新登录）→ 连接 IM → 启动网关
+jumpbyte-bot login        登录（有 phone 走验证码，否则扫码），写 cookie.json
 jumpbyte-bot --selftest   自检算法
 jumpbyte-bot --smoke      给自己发一条测试消息，验证收发联机
 ```
 
 首次运行无 `cookie.json` 时自动进入扫码登录，终端打印二维码并存一份 `qrcode.png`。
 二维码默认半块渲染，设 `GOBOT_QR=braille` 切换为更小的盲文点阵。
+
+**手机号+验证码登录**：在 `cookie.json` 填 `phone`（`cookie` 留空即可），启动后自动发短信、
+终端提示输入验证码换取 cookie；之后 cookie 失效也会用同一手机号重新走验证码登录。
+手机号与验证码都用 `code_encrypt`（`XOR 5`+hex）加密，签名与扫码登录同源。
 
 ## 配置
 
@@ -36,6 +40,7 @@ jumpbyte-bot --smoke      给自己发一条测试消息，验证收发联机
   "id": "main",
   "name": "主号",
   "cookie": "sessionid=...; ...",
+  "phone": "",
   "uid": "1234567890",
   "device_id": "3249781169",
   "proxy": "",
@@ -43,6 +48,8 @@ jumpbyte-bot --smoke      给自己发一条测试消息，验证收发联机
   "enabled": true
 }
 ```
+
+> 只想用验证码登录：`{ "phone": "13800138000", "enabled": true }` 即可，`cookie`/`uid` 会在登录后自动补全。
 
 `bot.json`（网关，首次启动自动生成，`token` 随机）：
 
@@ -97,7 +104,7 @@ cmd/bot            入口：命令分发、扫码登录、收发主循环
 internal/
   sign             passport web 签名（sign / qs / xor5 / msToken）
   abogus           a_bogus（SM3 + RC4变体 + base64变体）
-  login            扫码登录、MFA、cookie 探测
+  login            扫码 / 手机号验证码登录、MFA、cookie 探测
   qr               二维码渲染 + 存 PNG
   engine           IM 引擎
     proto.go         裸 protobuf 编解码器

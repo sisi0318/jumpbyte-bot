@@ -193,9 +193,30 @@ func (c *Client) call(path string, queryExtra, body map[string]string, lite bool
 	if err != nil {
 		return nil, err
 	}
+// bd-ticket-guard-iteration-version: 2
+// bd-ticket-guard-ree-public-key: BEPhQJtcnGrFIlCf8/m+Boe2kyBwe7Wj0hKUVpdDZlj1Dbb4qkcqtSzxGD4eaO6mc4aG9alH1Ka95D1e1ngTKJg=
+// bd-ticket-guard-server-cert-sn: 533240336124694022040808462028007165443034493949
+// bd-ticket-guard-version: 2
+// referer: https://imdesktop.douyin.com
+// sec-ch-ua: "Not.A/Brand";v="99", "Chromium";v="136"
+// sec-ch-ua-mobile: ?0
+// sec-ch-ua-platform: "Windows"
+// x-tt-passport-aid-sign: 437536ae85fd28413d036ecf7bf60798421979bdc1fcc15a493474d3bacfb525
+// x-tt-passport-csrf-token: 
+// x-tt-passport-trace-id: 81c3e95b
+// x-tt-passport-verify-portrait: 41918735-2cb8-47d6-a412-9f970bb8410d.login
+// priority: u=1, i
+	req.Header.Set("bd-ticket-guard-version", "2")
+	req.Header.Set("bd-ticket-guard-iteration-version", "2")
+	req.Header.Set("bd-ticket-guard-ree-public-key", "BEPhQJtcnGrFIlCf8/m+Boe2kyBwe7Wj0hKUVpdDZlj1Dbb4qkcqtSzxGD4eaO6mc4aG9alH1Ka95D1e1ngTKJg=")
+	req.Header.Set("bd-ticket-guard-server-cert-sn", "533240336124694022040808462028007165443034493949")
+	req.Header.Set("x-tt-passport-aid-sign", "437536ae85fd28413d036ecf7bf60798421979bdc1fcc15a493474d3bacfb525")
+	req.Header.Set("x-tt-passport-csrf-token", "")
+	req.Header.Set("x-tt-passport-trace-id", "81c3e95b")
+	req.Header.Set("x-tt-passport-verify-portrait", "41918735-2cb8-47d6-a412-9f970bb8410d.login")
 	req.Header.Set("User-Agent", c.UA)
 	req.Header.Set("Referer", "https://imdesktop.douyin.com")
-	req.Header.Set("Origin", "https://imdesktop.douyin.com")
+	// req.Header.Set("Origin", "https://imdesktop.douyin.com")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	if ck := c.Jar.Header(); ck != "" {
 		req.Header.Set("Cookie", ck)
@@ -227,7 +248,7 @@ func (c *Client) ttwidCheck() {
 	req.Header.Set("User-Agent", c.UA)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Referer", "https://imdesktop.douyin.com")
-	req.Header.Set("Origin", "https://imdesktop.douyin.com")
+	// req.Header.Set("Origin", "https://imdesktop.douyin.com")
 	if ck := c.Jar.Header(); ck != "" {
 		req.Header.Set("Cookie", ck)
 	}

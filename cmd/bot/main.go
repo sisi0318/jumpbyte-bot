@@ -156,8 +156,15 @@ func saveQRPng(content, pngBase64 string) (string, error) {
 	return path, nil
 }
 
-func loginAndSave(deviceID string) (*config.Account, error) {
-	r, err := login.QRLogin(terminalHooks(), deviceID)
+// loginAndSave phone 非空走短信验证码登录，否则扫码登录；结果落盘（保留 phone 供下次自愈）。
+func loginAndSave(deviceID, phone string) (*config.Account, error) {
+	var r *login.LoginResult
+	var err error
+	if phone != "" {
+		r, err = login.SMSLogin(phone, terminalHooks(), deviceID)
+	} else {
+		r, err = login.QRLogin(terminalHooks(), deviceID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +172,7 @@ func loginAndSave(deviceID string) (*config.Account, error) {
 	if name == "" {
 		name = "账号" + r.UID
 	}
-	acc := &config.Account{ID: "main", Name: name, Cookie: r.Cookie, UID: r.UID, DeviceID: r.DeviceID, Channel: 1, Enabled: true}
+	acc := &config.Account{ID: "main", Name: name, Cookie: r.Cookie, Phone: phone, UID: r.UID, DeviceID: r.DeviceID, Channel: 1, Enabled: true}
 	if err := config.SaveAccount(acc); err != nil {
 		return nil, err
 	}
@@ -173,12 +180,16 @@ func loginAndSave(deviceID string) (*config.Account, error) {
 }
 
 func runLogin() {
-	fmt.Println("=== 扫码登录（单账号）===")
-	did := ""
+	did, phone := "", ""
 	if a, err := config.LoadAccount(); err == nil {
-		did = a.DeviceID
+		did, phone = a.DeviceID, a.Phone
 	}
-	acc, err := loginAndSave(did)
+	if phone != "" {
+		fmt.Println("=== 短信验证码登录（单账号，手机号 " + phone + "）===")
+	} else {
+		fmt.Println("=== 扫码登录（单账号）===")
+	}
+	acc, err := loginAndSave(did, phone)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "✘ 登录失败："+err.Error())
 		os.Exit(1)
@@ -190,19 +201,30 @@ func runCli() {
 	acc, err := config.LoadAccount()
 	if err != nil {
 		fmt.Println("[bot] 未找到 cookie.json，先扫码登录...")
-		acc, err = loginAndSave("")
+		acc, err = loginAndSave("", "")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "[bot] 启动失败："+err.Error())
 			os.Exit(1)
 		}
+	} else if acc.Cookie == "" && acc.Phone != "" {
+		// phone-only 配置：直接短信登录
+		fmt.Println("[bot] 检测到 phone，短信验证码登录...")
+		if acc, err = loginAndSave(acc.DeviceID, acc.Phone); err != nil {
+			fmt.Fprintln(os.Stderr, "[bot] 登录失败："+err.Error())
+			os.Exit(1)
+		}
 	} else {
 		p := login.ProbeCookie(acc.Cookie, acc.DeviceID)
+		loginWord := "唤起扫码登录"
+		if acc.Phone != "" {
+			loginWord = "短信验证码登录"
+		}
 		switch {
 		case p.Alive:
 			fmt.Printf("[bot] cookie 有效：uid=%s %s\n", p.UID, p.Name)
 		case p.Expired:
-			fmt.Println("[bot] cookie 已失效（" + p.Reason + "），唤起扫码登录...")
-			if acc, err = loginAndSave(acc.DeviceID); err != nil {
+			fmt.Println("[bot] cookie 已失效（" + p.Reason + "），" + loginWord + "...")
+			if acc, err = loginAndSave(acc.DeviceID, acc.Phone); err != nil {
 				fmt.Fprintln(os.Stderr, "[bot] 登录失败："+err.Error())
 				os.Exit(1)
 			}
@@ -336,9 +358,9 @@ func runEngineLoop(eng *engine.Client, acc *config.Account, gw *gateway.Gateway,
 	}
 }
 
-// relogin cookie 失效时重新扫码登录，原地更新 acc + eng（网关持有 acc 指针，同步生效）。
+// relogin cookie 失效时重新登录（有 phone 走短信，否则扫码），原地更新 acc + eng（网关持有 acc 指针，同步生效）。
 func relogin(eng *engine.Client, acc *config.Account) bool {
-	na, err := loginAndSave(acc.DeviceID)
+	na, err := loginAndSave(acc.DeviceID, acc.Phone)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "[engine] 重新登录失败："+err.Error())
 		return false
