@@ -237,6 +237,10 @@ func runCli() {
 	// 网关：HTTP 发消息 + WS 收事件（像 QQ bot）。token 在 bot.json，首次自动生成。
 	var gw *gateway.Gateway
 	if bcfg, e := config.LoadBotConfig(); e == nil {
+		eng.SendChannel = bcfg.SendChannel // 发送通道：ws / http(默认)
+		if strings.EqualFold(bcfg.SendChannel, "ws") {
+			fmt.Println("[send] 发送通道：安卓 frontier WS")
+		}
 		gw = gateway.New(bcfg, acc, eng)
 		if e := gw.Start(); e != nil {
 			fmt.Println("[gateway] 启动失败：" + e.Error())

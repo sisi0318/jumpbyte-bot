@@ -52,12 +52,14 @@ Authorization: Bearer <令牌>
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `conv_id` | 二选一 | 会话 ID，回消息时用事件里的这个值 |
-| `to_uid` | 二选一 | 目标数字 uid，网关自动拼会话 |
+| `conv_id` | 二选一 | 会话 ID，回消息时用事件里的这个值（私信或群聊都用它） |
+| `to_uid` | 二选一 | 目标数字 uid，网关自动拼**私信**会话 |
 | `conv_short_id` | 否 | 已知就带上（回复 / 撤回更稳） |
 | `account` | 否 | 单账号可省略 |
 
-`conv_id` 格式 `0:1:{较小uid}:{较大uid}`，两个 uid 按数值排序。
+`conv_id` 两种形态：**私信** `0:1:{较小uid}:{较大uid}`（两 uid 按数值排序）；**群聊** 是纯数字群号
+（如 `7681236801654178341`，来自群消息事件或 `get_conversations`）。发送类动作对两者一视同仁，
+网关按 `conv_id` 形态自动判定单聊/群聊——回群消息直接把事件里的群 `conv_id` 传回即可。
 
 ### 发送类动作的返回
 
@@ -238,6 +240,34 @@ curl -s -X POST $BASE/api/get_video_url -H "Authorization: Bearer $TOKEN" \
 > `main_url`/`backup_url` 指向的视频流仍是 CENC 加密（`cenc-aes-ctr`，key = `video.skey`）。
 > `play_url` 是本地解密代理：打开即得明文可播 MP4，无需自己解密。
 
+### `get_conversations` —— 会话列表（群 + 私信）
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `count` | 否 | 拉取条数，默认 20 |
+
+```bash
+curl -s -X POST $BASE/api/get_conversations -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"count":50}'
+```
+
+```jsonc
+{ "code": 0, "data": { "count": 4, "conversations": [
+  {
+    "conv_id": "7681236801654178341",   // 群号；直接拿去 send_text 就是群发言
+    "is_group": true, "conv_type": 2,   // conv_type: 1 私信 / 2 群聊
+    "conv_short_id": "7681236801654178341",
+    "avatar": "http://p3-aweme-im-img.byteimg.com/…",
+    "owner_uid": "3916922778814715",
+    "last_msg_time": 1788427512,
+    "members": [
+      { "uid": "2119508107991872", "sec_uid": "MS4wLjAB…", "role": 0 },
+      { "uid": "3916922778814715", "sec_uid": "MS4wLjAB…", "role": 1 }
+    ]
+  }
+] } }
+```
+
 ### `GET /video` —— 视频解密代理
 
 免令牌（`<video src>` 带不了 header）。用 `tkey` 换 CDN 地址、下载 CENC MP4、用 `skey`
@@ -280,7 +310,8 @@ curl -s $BASE/health
 ```jsonc
 { "type": "message", "id": "8e3f…", "time": 1787735984,
   "account": "main", "self_uid": "1234",
-  "conv_id": "0:1:1234:5678",
+  "conv_id": "0:1:1234:5678",       // 群聊时是纯数字群号
+  "is_group": false,                // true=群聊；回消息把上面的 conv_id 传回即可
   "sender_id": "5678",
   "sender_sec_uid": "MS4wLjAB…",
   "text": "在吗",
@@ -313,6 +344,19 @@ curl -s $BASE/health
   "poster": { … }                  // 封面图，结构同 image（带 links 解密链接）
 }
 ```
+
+**表情消息**带 `emoji`（无 `image`/`video`；`text` 为表情名）：
+
+```jsonc
+"emoji": {
+  "display_name": "续火花",         // 表情名（也作 text 占位）
+  "image_type": "png", "width": 100, "height": 100,
+  "url": "https://p3-sign.douyinpic.com/obj/im-resource/…",  // 明文图，直接可显示（不用解密）
+  "sticker_id": "…"
+}
+```
+
+私信、群聊、图片 / 视频 / 表情消息走同一套 `message` 事件，只是多带对应子对象；群聊额外 `is_group:true`。
 
 ### `connect` / `disconnect`
 

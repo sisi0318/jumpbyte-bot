@@ -3,8 +3,10 @@
 ## 功能
 
 - 登录：扫码（含短信二次验证）或手机号+短信验证码；cookie 失效自动重新登录
-- 收私信：文本、图片（自动解密）、视频（CENC 自动解密，`play_url` 拿来即播）
-- 发私信：文本、图片、视频、表情、引用回复
+- 私信 + 群聊：同一套收发，群聊事件带 `is_group`、群号即 `conv_id`
+- 收消息：文本、图片（自动解密）、视频（CENC 自动解密，`play_url` 拿来即播）、表情、系统提示
+- 发消息：文本、图片、视频、表情、引用回复（私信/群聊通用）
+- 会话列表：`get_conversations` 拉群 + 私信（含成员、群头像、最后消息时间）
 - 撤回消息
 - HTTP 接口发消息 + WebSocket 推事件（见 [API.md](API.md)）
 - 原始 protobuf 帧调试通道 `/oriws`
@@ -59,9 +61,13 @@ jumpbyte-bot --smoke      给自己发一条测试消息，验证收发联机
   "port": 9503,
   "token": "<自动生成>",
   "queue_limit": 1000,
-  "emit_self": false
+  "emit_self": false,
+  "send_channel": "http"
 }
 ```
+
+> `send_channel`：`http`（默认，走 imapi）或 `ws`（走安卓 frontier WS）。二者内容/会话逻辑完全一致，
+> 只是传输外壳不同。**群聊在 HTTP 通道可能被风控拒（status_code 7523），此时切 `ws` 用安卓端身份绕开。**
 
 ## 网关
 
@@ -74,7 +80,7 @@ jumpbyte-bot --smoke      给自己发一条测试消息，验证收发联机
 | `ws /oriws?access_token=<token>` | 原始 protobuf 帧（base64 + 解码树），调试 / 逆向新消息类型 |
 | `GET /health` | 存活与账号状态，免鉴权 |
 
-动作：`send_text`、`send_image`、`upload_image`、`send_video`、`send_emoji`、`send_reply`、`recall`、`get_video_url`、`get_accounts`。字段与示例见 [API.md](API.md)。
+动作：`send_text`、`send_image`、`upload_image`、`send_video`、`send_emoji`、`send_reply`、`recall`、`get_video_url`、`get_conversations`、`get_accounts`。字段与示例见 [API.md](API.md)。
 
 跑起来的终端也可直接输入 `@<conv_id> <文本>` 回车发消息。
 
@@ -110,7 +116,9 @@ internal/
     proto.go         裸 protobuf 编解码器
     wsconn.go        WebSocket（收消息）
     client.go        连接 / 收包解析
-    httpsend.go      发消息 HTTP 通道
+    httpsend.go      发消息 HTTP 通道（imapi）+ 通道分发
+    wssend.go        发消息 WS 通道（安卓 frontier，风控绕行）
+    convlist.go      会话列表（群 + 私信）
     imactions.go     撤回 / 表情 / 回复
     upload.go        图片上传（SigV4 → TOS）
     video.go         视频分片上传
@@ -121,7 +129,7 @@ internal/
   config           cookie.json / bot.json
 ```
 
-收消息走 WebSocket，发消息走 HTTP，二者 protobuf 同源，共用一套编解码器。
+收消息走 WebSocket；发消息默认走 HTTP、可切安卓 WS，二者 protobuf 同源，共用一套编解码器与内容/会话逻辑。
 
 ## 状态
 

@@ -27,6 +27,25 @@ const (
 	pcUA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) douyinim/1.1.33 Chrome/136.0.7103.59 Electron/36.3.2 Safari/537.36"
 )
 
+// 会话类型(field100.f2)：1=单聊(私信)，2=群聊。私信/群聊发送同一端点，只有此字段与 short_id 不同。
+const (
+	convTypeSingle = 1
+	convTypeGroup  = 2
+)
+
+// 消息类型(field100.f6)：按内容种类取值（与会话类型无关，逆自真机 HAR：私信/群聊同一套）。
+const (
+	msgTypeText  = 7
+	msgTypeEmoji = 5
+	msgTypeImage = 27
+	msgTypeVideo = 30
+)
+
+// isGroupConv 群会话 id 是纯数字（如 7681236801654178341）；私信是 "0:1:小:大"。
+func isGroupConv(convID string) bool {
+	return isDigits(strings.TrimSpace(convID))
+}
+
 // 复用 http.Client 以复用连接（TLS 握手）。imHTTP 用于短请求，uploadHTTP 用于上传/分片。
 var (
 	imHTTP     = &http.Client{Timeout: 30 * time.Second}
@@ -111,18 +130,19 @@ func (c *Client) buildEnvelope(cmd, innerField int, inner []byte, dev string) []
 }
 
 // buildIMAPIBody 组发消息(cmd100)的 body，返回 (body, clientMsgID)。
-func (c *Client) buildIMAPIBody(convID string, shortID uint64, contentJSON string) ([]byte, string) {
+// convType：1 单聊 / 2 群聊；msgType：内容种类(文本7/表情5/图片27/视频30)。
+func (c *Client) buildIMAPIBody(convID string, shortID uint64, contentJSON string, convType, msgType int) ([]byte, string) {
 	ms := time.Now().UnixMilli()
 	clientMsgID := uuid.NewString()
 	field100 := concat(
 		encodeLenDelimS(1, convID),
-		encodeFieldVarint(2, 1),
+		encodeFieldVarint(2, uint64(convType)),
 		encodeFieldVarint(3, shortID),
 		encodeLenDelimS(4, contentJSON),
 		encodeKvPair(5, "s:mentioned_users", ""),
 		encodeKvPair(5, "s:client_message_id", clientMsgID),
 		encodeKvPair(5, "s:stime", fmt.Sprintf("%d.%04d", ms, ms%10000)),
-		encodeFieldVarint(6, 7),
+		encodeFieldVarint(6, uint64(msgType)),
 		encodeLenDelimS(8, clientMsgID),
 	)
 	return c.buildEnvelope(100, 100, field100, c.deviceID()), clientMsgID
@@ -150,14 +170,35 @@ func (c *Client) postIMAPIRaw(url string, body []byte) ([]byte, error) {
 	return rb, nil
 }
 
+// resolveConvSend 由 convID 形态定发送用的 (conv_type, short_id)：
+// 纯数字=群聊(short_id 即会话号)，"0:1:.."=私信(short_id 走收包缓存)。HTTP/WS 两条通道共用。
+func (c *Client) resolveConvSend(convID string, shortID uint64) (int, uint64) {
+	if isGroupConv(convID) {
+		if shortID == 0 {
+			shortID, _ = strconv.ParseUint(strings.TrimSpace(convID), 10, 64)
+		}
+		return convTypeGroup, shortID
+	}
+	return convTypeSingle, c.resolveShort(convID, shortID)
+}
+
+// dispatchSend 按 SendChannel 选发送通道：ws 走安卓 frontier WS，否则(默认)走 HTTP imapi。
+// content / conv_type / msg_type 两条通道完全复用，只有传输外壳不同。
+func (c *Client) dispatchSend(convID string, shortID uint64, contentJSON string, msgType int) (SendResult, error) {
+	if strings.EqualFold(strings.TrimSpace(c.SendChannel), "ws") {
+		return c.sendViaWS(convID, shortID, contentJSON, msgType)
+	}
+	return c.sendIMAPI(convID, shortID, contentJSON, msgType)
+}
+
 // sendIMAPI 发消息(cmd100)并解析回执（f3=status,0=OK；f6→f100→f1=server_msg_id）。
-func (c *Client) sendIMAPI(convID string, shortID uint64, contentJSON string) (SendResult, error) {
-	shortID = c.resolveShort(convID, shortID)
+func (c *Client) sendIMAPI(convID string, shortID uint64, contentJSON string, msgType int) (SendResult, error) {
+	convType, shortID := c.resolveConvSend(convID, shortID)
 	res := SendResult{ConvID: convID, SelfUID: c.CkUid, ConvShortID: u64str(shortID)}
 	if strings.TrimSpace(c.CkUid) == "" {
 		return res, fmt.Errorf("未初始化：缺少 user_id")
 	}
-	body, clientMsgID := c.buildIMAPIBody(convID, shortID, contentJSON)
+	body, clientMsgID := c.buildIMAPIBody(convID, shortID, contentJSON, convType, msgType)
 	res.ClientMsgID = clientMsgID
 	rb, err := c.postIMAPIRaw(imapiSendURL, body)
 	if err != nil {

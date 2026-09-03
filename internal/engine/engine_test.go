@@ -48,7 +48,7 @@ func TestVarintRoundTrip(t *testing.T) {
 func TestBuildAndCollectRoundTrip(t *testing.T) {
 	c := New("sid=abc", "3249781169", "3249781169")
 	content := jsonNoEscape(imapiTextContent{AweType: 700, Type: 0, RichTextInfos: []any{}, Text: "你好&<world>"})
-	payload, cmid := c.buildIMAPIBody("0:1:111:222", 0, content)
+	payload, cmid := c.buildIMAPIBody("0:1:111:222", 0, content, convTypeSingle, msgTypeText)
 	if len(cmid) != 36 {
 		t.Fatalf("clientMsgId 应为 uuid: %q", cmid)
 	}

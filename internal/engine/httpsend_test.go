@@ -17,7 +17,7 @@ func TestBuildIMAPIBodyMatchesHAR(t *testing.T) {
 	convID := "0:1:2119508107991872:3916922778814715"
 	var shortID uint64 = 7678270758086263345
 	content := jsonNoEscape(imapiTextContent{AweType: 700, Type: 0, RichTextInfos: []any{}, Text: "qwq"})
-	body, cmid := c.buildIMAPIBody(convID, shortID, content)
+	body, cmid := c.buildIMAPIBody(convID, shortID, content, convTypeSingle, msgTypeText)
 	if len(cmid) != 36 {
 		t.Fatalf("clientMsgId 非 uuid: %q", cmid)
 	}

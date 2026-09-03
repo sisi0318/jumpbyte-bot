@@ -60,6 +60,10 @@ func (f *fakeSender) Recall(conv string, short, smid uint64) error {
 	return nil
 }
 
+func (f *fakeSender) ListConversations(count int) ([]engine.Conversation, error) {
+	return []engine.Conversation{{ConvID: "7681236801654178341", IsGroup: true, ConvType: 2}}, nil
+}
+
 func (f *fakeSender) ResolveVideoURL(tkey string) (engine.VideoURL, error) {
 	f.lastTkey = tkey
 	if f.resolveErr != nil {

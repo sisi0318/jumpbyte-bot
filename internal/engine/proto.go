@@ -143,8 +143,13 @@ func decodeProtobuf(data []byte, depth int) []ProtoField {
 				trimmed = strings.TrimLeft(text, " \t\n\r\f\v")
 			}
 			looksJson := textOk && trimmed != "" && (trimmed[0] == '{' || trimmed[0] == '[')
+			// sec_uid("MS4...")、URL、纯数字、uuid/hex 令牌(client_message_id 等)都是可打印标量串，
+			// 字节常能误当嵌套 message 解开(数字全是合法 varint、uuid 随机命中)，硬判为字符串。
+			looksToken := textOk && (strings.HasPrefix(trimmed, "MS4") ||
+				strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") ||
+				isDigits(trimmed) || looksHexToken(trimmed))
 
-			if looksJson {
+			if looksJson || looksToken {
 				fields = append(fields, ProtoField{Field: fieldNum, Type: "string", VStr: text})
 			} else {
 				var nested []ProtoField
@@ -231,6 +236,21 @@ func isDigits(s string) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// looksHexToken：长度≥8 且只含 [0-9a-fA-F-]（uuid / md5 / hex id）。这类标量串会被裸解码器
+// 随机误当嵌套 message，硬判为字符串。真正的嵌套 message 含 tag/长度控制字节，不会全落此集。
+func looksHexToken(s string) bool {
+	if len(s) < 8 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '-') {
 			return false
 		}
 	}

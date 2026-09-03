@@ -85,7 +85,7 @@ func (c *Client) SendEmojiResult(convID string, shortID uint64, e EmojiSpec) (Se
 		URL:       imapiEmojiURL{URI: e.URL, URLList: []string{e.URL}},
 		CreatedAt: 0, IsCard: false, MsgHint: "", AweType: 507,
 	}
-	return c.sendIMAPI(convID, shortID, jsonNoEscape(content))
+	return c.dispatchSend(convID, shortID, jsonNoEscape(content), msgTypeEmoji)
 }
 
 // -- 回复（cmd 100，content 带 refmsg_*）-----------------------------------
@@ -117,7 +117,7 @@ func (c *Client) SendReplyResult(convID string, shortID uint64, r ReplySpec) (Se
 		RefmsgType: 7, Content: r.Text, RefmsgUID: r.RefUID, RefmsgSecUID: r.RefSecUID,
 		Nickname: r.Nickname, RefmsgContent: refContent, Version: 1, ItemID: "", SceneType: 1,
 	}
-	return c.sendIMAPI(convID, shortID, jsonNoEscape(content))
+	return c.dispatchSend(convID, shortID, jsonNoEscape(content), msgTypeText)
 }
 
 // ParseUint 宽松解析无符号整数（供网关拼 server_msg_id / short_id）。

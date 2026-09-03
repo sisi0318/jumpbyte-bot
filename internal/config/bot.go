@@ -10,11 +10,12 @@ import (
 
 // BotConfig 网关配置（bot.json）。token 首次启动自动生成写回。
 type BotConfig struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Token      string `json:"token"`       // 接入令牌，bot 用它连 WS 和调 HTTP
-	QueueLimit int    `json:"queue_limit"` // 每连接事件积压上限
-	EmitSelf   bool   `json:"emit_self"`   // 是否推 message_self（自己发的），单机自测用
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Token       string `json:"token"`        // 接入令牌，bot 用它连 WS 和调 HTTP
+	QueueLimit  int    `json:"queue_limit"`  // 每连接事件积压上限
+	EmitSelf    bool   `json:"emit_self"`    // 是否推 message_self（自己发的），单机自测用
+	SendChannel string `json:"send_channel"` // 发送通道：ws=安卓 frontier WS；空/http=HTTP imapi(默认)
 }
 
 // BotConfigPath bot.json 路径。

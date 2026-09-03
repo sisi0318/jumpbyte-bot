@@ -36,6 +36,10 @@ const (
 	awemeAppName           = "aweme"
 	awemeAppPackage        = "com.ss.android.ugc.aweme"
 	awemeUA                = "okhttp/3.12.1 com.ss.android.ugc.aweme/280400"
+
+	// WS 发送(安卓 frontier cmd100 内层)专用，逆自 TS ImClient.buildAndroidCmd100Inner。
+	awemeSDKVersion   = "5.0.3.0-rc.11-SNAPSHOT"
+	awemeBuildNumber2 = "5030"
 )
 
 // -- 对外类型 ---------------------------------------------------------------
@@ -75,27 +79,40 @@ type ImVideo struct {
 	Poster    *ImImage
 }
 
+// ImEmoji 表情消息（aweType 507）。url 是明文图地址（im-resource），可直接展示，无需解密。
+type ImEmoji struct {
+	DisplayName string
+	ImageType   string
+	Width       int
+	Height      int
+	URL         string
+	StickerID   string
+}
+
 // IncomingMessage 投递给上层的一条收到的消息。
 type IncomingMessage struct {
 	ConvID    string
+	IsGroup   bool // 群聊(conv_id 为纯数字)则 true；私信(0:1:小:大)为 false
 	SenderID  string
 	SenderMs4 string
 	Text      string
 	AweType   int
 	Image     *ImImage
 	Video     *ImVideo
+	Emoji     *ImEmoji
 	Direction string // 目前只投递 recv
 }
 
 // Client frontier-aweme IM 客户端（单账号）。
 type Client struct {
-	Cookie   string
-	CkUid    string // 账号 user_id，既作 selfUid 也作 device_id
-	DeviceID string
-	Proxy    *WsProxy
-	OnRaw    func([]byte) // 可选：每收到一帧原始 payload 就回调（调试用）
-	seq      int64
-	shortIDs sync.Map // convID(string) -> conv_short_id(uint64)，从收到的消息里学，发送时回填
+	Cookie      string
+	CkUid       string // 账号 user_id，既作 selfUid 也作 device_id
+	DeviceID    string
+	Proxy       *WsProxy
+	SendChannel string       // 发送通道："ws" 走安卓 frontier WS，其余(默认)走 HTTP imapi
+	OnRaw       func([]byte) // 可选：每收到一帧原始 payload 就回调（调试用）
+	seq         int64
+	shortIDs    sync.Map // convID(string) -> conv_short_id(uint64)，从收到的消息里学，发送时回填
 }
 
 // resolveShort 发送时若未显式给 short_id，用收包学到的缓存回填。
@@ -286,8 +303,8 @@ func (c *Client) handleIncoming(raw []byte, onMessage func(IncomingMessage)) {
 			}
 		}
 		onMessage(IncomingMessage{
-			ConvID: convID, SenderID: it.senderID, SenderMs4: it.senderMs4,
-			Text: it.text, AweType: it.aweType, Image: it.image, Video: it.video, Direction: it.direction,
+			ConvID: convID, IsGroup: isGroupConv(convID), SenderID: it.senderID, SenderMs4: it.senderMs4,
+			Text: it.text, AweType: it.aweType, Image: it.image, Video: it.video, Emoji: it.emoji, Direction: it.direction,
 		})
 	}
 }
@@ -327,6 +344,7 @@ type chatItem struct {
 	aweType     int
 	image       *ImImage
 	video       *ImVideo
+	emoji       *ImEmoji
 }
 
 type parsedItem struct {
@@ -335,6 +353,7 @@ type parsedItem struct {
 	direction string
 	image     *ImImage
 	video     *ImVideo
+	emoji     *ImEmoji
 }
 
 func (c *Client) extractChatItems(payload []byte, selfUid string) []chatItem {
@@ -383,7 +402,8 @@ func (c *Client) collectChat(fields []ProtoField, out *[]chatItem, senderID, con
 					if p, ok := c.parseChatJsonItem(obj, senderID, selfUid); ok {
 						*out = append(*out, chatItem{
 							direction: p.direction, convID: convID, senderID: senderID,
-							senderMs4: senderMs4, text: p.text, aweType: p.aweType, image: p.image, video: p.video,
+							senderMs4: senderMs4, text: p.text, aweType: p.aweType,
+							image: p.image, video: p.video, emoji: p.emoji,
 						})
 					}
 				}
@@ -439,7 +459,8 @@ func (c *Client) collectChatFromRawJson(payload []byte, out *[]chatItem, selfUid
 		}
 		seen[key] = true
 		*out = append(*out, chatItem{
-			direction: p.direction, convID: convID, text: p.text, aweType: p.aweType, image: p.image, video: p.video,
+			direction: p.direction, convID: convID, text: p.text, aweType: p.aweType,
+			image: p.image, video: p.video, emoji: p.emoji,
 		})
 	}
 }
@@ -492,7 +513,13 @@ func (c *Client) parseChatJsonItem(obj map[string]any, senderID, selfUid string)
 		}
 	}
 
-	// 文本：text > 展示文案 > 视频/图片占位
+	// 表情（aweType 507）：往往没有 text 字段，须在"文本判空"前抠出，否则被丢。url 是明文图。
+	var emoji *ImEmoji
+	if aweType == 507 {
+		emoji = parseEmoji(obj)
+	}
+
+	// 文本：text > 展示文案 > 表情名/占位
 	text, _ := obj["text"].(string)
 	if text == "" {
 		text = c.parseMessageDisplay(obj)
@@ -503,6 +530,12 @@ func (c *Client) parseChatJsonItem(obj map[string]any, senderID, selfUid string)
 			text = "[视频]"
 		case image != nil:
 			text = "[图片]"
+		case emoji != nil:
+			if emoji.DisplayName != "" {
+				text = emoji.DisplayName
+			} else {
+				text = "[表情]"
+			}
 		}
 	}
 	if text == "" {
@@ -518,7 +551,26 @@ func (c *Client) parseChatJsonItem(obj map[string]any, senderID, selfUid string)
 	if self != "" && sid != "" && sid == self {
 		dir = "sent"
 	}
-	return parsedItem{text: text, aweType: aweType, direction: dir, image: image, video: video}, true
+	return parsedItem{text: text, aweType: aweType, direction: dir, image: image, video: video, emoji: emoji}, true
+}
+
+// parseEmoji 从表情 content 抠出展示信息。url 优先取 url_list[0]，其次 uri。
+func parseEmoji(obj map[string]any) *ImEmoji {
+	e := &ImEmoji{
+		DisplayName: toStr(obj["display_name"]),
+		ImageType:   toStr(obj["image_type"]),
+		Width:       toInt(obj["width"]),
+		Height:      toInt(obj["height"]),
+		StickerID:   toStr(obj["sticker_id"]),
+	}
+	if u, ok := obj["url"].(map[string]any); ok {
+		if list := strList(u["url_list"]); len(list) > 0 {
+			e.URL = list[0]
+		} else if uri, _ := u["uri"].(string); uri != "" {
+			e.URL = uri
+		}
+	}
+	return e
 }
 
 // parseMessageDisplay 各类消息体的展示文案：文本 > 富文本 > 卡片标题 > 提示语。
@@ -582,7 +634,7 @@ func (c *Client) SendTextResult(conversationID, text string) (SendResult, error)
 // SendTextEx 发文本，可带会话短 ID（回复已知会话时带上更稳；0 表示不带）。
 func (c *Client) SendTextEx(conversationID string, shortID uint64, text string) (SendResult, error) {
 	content := jsonNoEscape(imapiTextContent{AweType: 700, Type: 0, RichTextInfos: []any{}, Text: text})
-	return c.sendIMAPI(conversationID, shortID, content)
+	return c.dispatchSend(conversationID, shortID, content, msgTypeText)
 }
 
 // SendImageResult 发图片（先 UploadImage 拿 ImageAsset）。走同一个 imapi 发送通道，只是 content 不同。
@@ -598,7 +650,7 @@ func (c *Client) SendImageResult(conversationID string, shortID uint64, img Imag
 	content.Md5 = img.Md5
 	content.FromGallery = 1
 	content.AweType = 2702
-	return c.sendIMAPI(conversationID, shortID, jsonNoEscape(content))
+	return c.dispatchSend(conversationID, shortID, jsonNoEscape(content), msgTypeImage)
 }
 
 // SendText 发一条文本。

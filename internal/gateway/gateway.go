@@ -115,6 +115,7 @@ type Sender interface {
 	Recall(convID string, shortID, serverMsgID uint64) error
 	UploadImage(imageBytes []byte) (engine.ImageAsset, error)
 	ResolveVideoURL(tkey string) (engine.VideoURL, error)
+	ListConversations(count int) ([]engine.Conversation, error)
 }
 
 // Gateway 单账号网关。
@@ -237,14 +238,15 @@ func (g *Gateway) EmitMessage(m engine.IncomingMessage) {
 		g.broadcast(map[string]any{
 			"type": "message_self", "id": randID(), "time": time.Now().Unix(),
 			"account": g.acc.ID, "self_uid": g.acc.UID,
-			"conv_id": m.ConvID, "text": m.Text,
+			"conv_id": m.ConvID, "is_group": m.IsGroup, "text": m.Text,
 		})
 		return
 	}
 	ev := map[string]any{
 		"type": "message", "id": randID(), "time": time.Now().Unix(),
 		"account": g.acc.ID, "self_uid": g.acc.UID,
-		"conv_id": m.ConvID, "sender_id": m.SenderID, "sender_sec_uid": m.SenderMs4, "text": m.Text,
+		"conv_id": m.ConvID, "is_group": m.IsGroup,
+		"sender_id": m.SenderID, "sender_sec_uid": m.SenderMs4, "text": m.Text,
 	}
 	if m.Image != nil {
 		ev["image"] = imageEvent(m.Image)
@@ -252,7 +254,18 @@ func (g *Gateway) EmitMessage(m engine.IncomingMessage) {
 	if m.Video != nil {
 		ev["video"] = videoEvent(m.Video)
 	}
+	if m.Emoji != nil {
+		ev["emoji"] = emojiEvent(m.Emoji)
+	}
 	g.broadcast(ev)
+}
+
+// emojiEvent 表情事件对象：展示名 + 明文图地址（可直接展示，无需解密）。
+func emojiEvent(e *engine.ImEmoji) map[string]any {
+	return map[string]any{
+		"display_name": e.DisplayName, "image_type": e.ImageType,
+		"width": e.Width, "height": e.Height, "url": e.URL, "sticker_id": e.StickerID,
+	}
 }
 
 // videoEvent 视频事件对象：tkey/skey + 封面 poster（带解密链接）+ play_url（拿来即播的本地解密代理）。
@@ -481,7 +494,8 @@ func (g *Gateway) handleAPI(w http.ResponseWriter, r *http.Request) {
 func knownAction(name string) bool {
 	switch name {
 	case "get_accounts", "send_text", "send_card", "send_action_card",
-		"send_emoji", "send_image", "send_reply", "send_video", "upload_image", "recall", "get_video_url":
+		"send_emoji", "send_image", "send_reply", "send_video", "upload_image", "recall",
+		"get_video_url", "get_conversations":
 		return true
 	}
 	return false
@@ -520,6 +534,8 @@ func (g *Gateway) dispatch(name string, in map[string]any) any {
 		return g.actionRecall(in)
 	case "get_video_url":
 		return g.actionGetVideoURL(in)
+	case "get_conversations":
+		return g.actionGetConversations(in)
 	default:
 		// send_card / send_action_card
 		return errMsg(500, "Go 版网关暂未实现该动作："+name)
@@ -606,6 +622,15 @@ func (g *Gateway) actionGetVideoURL(in map[string]any) any {
 		"main_url": u.MainURL, "backup_url": u.BackupURL, "expire_time": u.ExpireTime,
 		"play_url": media.VideoLink(tkey, getStr(in, "skey")),
 	})
+}
+
+// actionGetConversations 拉会话列表（群 + 单聊）。count 可选，默认 20。
+func (g *Gateway) actionGetConversations(in map[string]any) any {
+	convs, err := g.eng.ListConversations(getIntV(in, "count"))
+	if err != nil {
+		return errMsg(500, err.Error())
+	}
+	return okData(map[string]any{"conversations": convs, "count": len(convs)})
 }
 
 func (g *Gateway) actionRecall(in map[string]any) any {

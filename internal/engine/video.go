@@ -70,7 +70,7 @@ func (c *Client) SendVideoResult(convID string, shortID uint64, videoBytes, cove
 	if checkPic != "" {
 		content.CheckPics = []string{checkPic}
 	}
-	return c.sendIMAPI(convID, shortID, jsonNoEscape(content))
+	return c.dispatchSend(convID, shortID, jsonNoEscape(content), msgTypeVideo)
 }
 
 // uploadVideo TOS 分片上传视频，返回 tkey/skey/md5。

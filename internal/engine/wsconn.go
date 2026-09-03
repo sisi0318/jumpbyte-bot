@@ -87,6 +87,9 @@ func wsConnect(rawURL string, headers map[string]string, px *WsProxy, handshakeT
 
 func applyProxy(d *websocket.Dialer, px *WsProxy) error {
 	if px == nil || px.Host == "" {
+		// 无显式代理时跟随 HTTP(S)_PROXY / ALL_PROXY / NO_PROXY 环境变量，
+		// 让 WS 和 HTTP 一样能经终端代理抓包分析（TLS 已 InsecureSkipVerify，MITM 直通）。
+		d.Proxy = http.ProxyFromEnvironment
 		return nil
 	}
 	scheme := px.Scheme
