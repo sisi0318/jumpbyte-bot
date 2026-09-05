@@ -33,6 +33,9 @@ type WsConn struct {
 	closeMu  sync.Mutex
 	closed   atomic.Bool
 	closeErr atomic.Value // error
+	// lastAct 最近一次收到任何帧的时间（UnixNano）。数据帧、pong、服务端 ping 都算。
+	// 保活证据大部分是控制帧，只盯数据帧会把安静的连接误判成掉线。
+	lastAct atomic.Int64
 }
 
 // wsConnect 建立连接；握手失败抛错。headers 里的 Sec-WebSocket-Protocol 会转成子协议。
@@ -81,8 +84,50 @@ func wsConnect(rawURL string, headers map[string]string, px *WsProxy, handshakeT
 	ws.SetReadLimit(maxFrameBytes)
 
 	c := &WsConn{ws: ws, msgs: make(chan []byte, 256), done: make(chan struct{})}
+	c.touch()
+
+	// gorilla 在 ReadMessage 内部消化控制帧、不会交给上层，所以 pong 和服务端 ping
+	// 必须在这里记账——否则「一段时间没有聊天消息」会和「连接真的断了」长得一模一样。
+	ws.SetPongHandler(func(string) error {
+		c.touch()
+		return nil
+	})
+	ws.SetPingHandler(func(appData string) error {
+		c.touch()
+		c.writeMu.Lock()
+		err := ws.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
+		c.writeMu.Unlock()
+		// 与 gorilla 默认 ping 处理一致：这两种失败不算错
+		if errors.Is(err, websocket.ErrCloseSent) {
+			return nil
+		}
+		if e, ok := err.(net.Error); ok && e.Timeout() {
+			return nil
+		}
+		return err
+	})
+
 	go c.reader()
 	return c, nil
+}
+
+func (c *WsConn) touch() { c.lastAct.Store(time.Now().UnixNano()) }
+
+// IdleFor 距上次收到任何帧（数据 / pong / 服务端 ping）过了多久。
+func (c *WsConn) IdleFor() time.Duration {
+	t := c.lastAct.Load()
+	if t == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, t))
+}
+
+// Err 断开原因；还连着时返回 nil。
+func (c *WsConn) Err() error {
+	if !c.closed.Load() {
+		return nil
+	}
+	return c.err()
 }
 
 func applyProxy(d *websocket.Dialer, px *WsProxy) error {
@@ -130,6 +175,7 @@ func (c *WsConn) reader() {
 			c.setClosed(err)
 			return
 		}
+		c.touch()
 		select {
 		case c.msgs <- data:
 		case <-c.done:
