@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -201,14 +202,19 @@ func (c *Client) makeClient(wsURL string) (*WsConn, error) {
 
 // -- 收发主循环 -------------------------------------------------------------
 
-// RunSession 心跳 + 收包主循环，返回断开原因：stop（被要求停止）或 disconnect（连接断了）。
-func (c *Client) RunSession(conn *WsConn, onMessage func(IncomingMessage), shouldStop func() bool) string {
+// RunSession 心跳 + 收包主循环。
+// 返回 reason（stop / disconnect，网关事件用，值域不变）和 detail（人类可读的断开原因，打日志用）。
+func (c *Client) RunSession(conn *WsConn, onMessage func(IncomingMessage), shouldStop func() bool) (string, string) {
+	// 连接参数里声明了 ping-interval=30，我们 15 秒一个 ping 留足余量。
+	// deadAfter 判的是「任何帧都没收到」——pong 也算在内，所以只有真的黑洞掉线才会触发，
+	// 阈值给宽松些：宁可晚几十秒发现，也别把好连接自己掐掉重连。
 	const heartbeat = 15 * time.Second
-	const deadAfter = 40 * time.Second
+	const deadAfter = 90 * time.Second
 
-	var lastRecv atomic.Int64
-	lastRecv.Store(time.Now().Unix())
-	reason := "disconnect"
+	var stopped atomic.Bool
+	var detail atomic.Pointer[string]
+	setDetail := func(s string) { detail.CompareAndSwap(nil, &s) } // 只记第一个原因
+
 	stop := make(chan struct{})
 	var once sync.Once
 	done := func() { once.Do(func() { close(stop) }) }
@@ -222,7 +228,8 @@ func (c *Client) RunSession(conn *WsConn, onMessage func(IncomingMessage), shoul
 				return
 			case <-t.C:
 				conn.Ping()
-				if time.Now().Unix()-lastRecv.Load() > int64(deadAfter/time.Second) {
+				if idle := conn.IdleFor(); idle > deadAfter {
+					setDetail(fmt.Sprintf("本地判死：%s 没收到任何帧（含 pong）", idle.Round(time.Second)))
 					done()
 					return
 				}
@@ -240,7 +247,7 @@ func (c *Client) RunSession(conn *WsConn, onMessage func(IncomingMessage), shoul
 					return
 				case <-t.C:
 					if shouldStop() {
-						reason = "stop"
+						stopped.Store(true)
 						done()
 						return
 					}
@@ -258,10 +265,8 @@ loop:
 		}
 		raw, err := conn.Receive(time.Second)
 		if err != nil {
+			setDetail("连接被关闭：" + err.Error())
 			break
-		}
-		if raw != nil {
-			lastRecv.Store(time.Now().Unix())
 		}
 		if len(raw) == 0 {
 			continue
@@ -273,7 +278,17 @@ loop:
 	}
 	done()
 	conn.Close()
-	return reason
+
+	if stopped.Load() {
+		return "stop", ""
+	}
+	if d := detail.Load(); d != nil {
+		return "disconnect", *d
+	}
+	if e := conn.Err(); e != nil {
+		return "disconnect", e.Error()
+	}
+	return "disconnect", ""
 }
 
 func (c *Client) handleIncoming(raw []byte, onMessage func(IncomingMessage)) {

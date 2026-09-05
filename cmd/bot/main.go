@@ -326,19 +326,24 @@ func runEngineLoop(eng *engine.Client, acc *config.Account, gw *gateway.Gateway,
 			fn()
 		}
 	}
+	// 上一轮会话跑够久就说明 cookie 没问题，下一轮跳过探测：少一次请求，少一点风控面
+	trustCookie := false
 	for {
-		// 每轮先确认 cookie 还有效，失效就重新登录（否则会无限空转重连）
-		if p := login.ProbeCookie(acc.Cookie, acc.DeviceID); p.Expired {
-			fmt.Println("[engine] cookie 失效，重新登录…")
-			setState("invalid", "cookie 失效")
-			emit(func() { gw.EmitDisconnect("INVALID") })
-			if !relogin(eng, acc) {
-				time.Sleep(backoff)
-				backoff = capDur(backoff*2, maxBackoff)
-				continue
+		if !trustCookie {
+			// 确认 cookie 还有效，失效就重新登录（否则会无限空转重连）
+			if p := login.ProbeCookie(acc.Cookie, acc.DeviceID); p.Expired {
+				fmt.Println("[engine] cookie 失效，重新登录…")
+				setState("invalid", "cookie 失效")
+				emit(func() { gw.EmitDisconnect("INVALID") })
+				if !relogin(eng, acc) {
+					time.Sleep(backoff)
+					backoff = capDur(backoff*2, maxBackoff)
+					continue
+				}
+				backoff = 2 * time.Second
 			}
-			backoff = 2 * time.Second
 		}
+		trustCookie = false
 
 		setState("connecting", "connecting")
 		conn, err := eng.Connect()
@@ -354,10 +359,17 @@ func runEngineLoop(eng *engine.Client, acc *config.Account, gw *gateway.Gateway,
 		fmt.Println("[engine] 已连接，开始收消息")
 		emit(func() { gw.SetOnline(); gw.EmitConnect("online") })
 
-		reason := eng.RunSession(conn, deliver, nil)
-		fmt.Printf("[engine] 连接断开(%s)，稍后重连\n", reason)
-		setState("offline", reason)
+		sessionStart := time.Now()
+		reason, detail := eng.RunSession(conn, deliver, nil)
+		online := time.Since(sessionStart).Round(time.Second)
+		if detail == "" {
+			detail = reason
+		}
+		fmt.Printf("[engine] 连接断开(%s)，在线 %v：%s，稍后重连\n", reason, online, detail)
+		setState("offline", detail)
 		emit(func() { gw.EmitDisconnect(reason) })
+		// 撑够一分钟说明 cookie 是好的，这次只是网络或服务端抖动，下一轮不用再探
+		trustCookie = online > time.Minute
 		time.Sleep(2 * time.Second)
 	}
 }
